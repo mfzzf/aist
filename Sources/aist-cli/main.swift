@@ -8,8 +8,8 @@ import Foundation
 // For trying other providers: AIST_BASE_URL, AIST_MODEL, AIST_FORMAT (anthropic|openai), AIST_API_KEY.
 
 let args = CommandLine.arguments
-guard args.count >= 3, ["extract", "email", "chat", "meeting"].contains(args[1]) else {
-    FileHandle.standardError.write(Data("usage: aist-cli extract <image> [--app <name>] | email <file>  [--me <names>]\n".utf8))
+guard args.count >= 3, ["extract", "email", "chat", "meeting", "note"].contains(args[1]) else {
+    FileHandle.standardError.write(Data("usage: aist-cli extract <image> [--app <name>] | email|note <file>  [--me <names>]\n".utf8))
     exit(2)
 }
 var me: [String] = []
@@ -57,6 +57,9 @@ do {
     if args[1] == "chat" {
         let text = try String(contentsOfFile: args[2], encoding: .utf8)
         todos = try await extractor.extract(chatText: text, app: frontApp ?? "企业微信")
+    } else if args[1] == "note" {
+        let text = try String(contentsOfFile: args[2], encoding: .utf8)
+        todos = try await extractor.extract(note: text, existing: [])
     } else if args[1] == "email" {
         let text = try String(contentsOfFile: args[2], encoding: .utf8)
         todos = try await extractor.extract(email: text, existing: [])

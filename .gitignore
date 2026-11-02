@@ -4,3 +4,5 @@ build/
 .swiftpm/
 *.xcuserstate
 xcuserdata/
+Apps/iOS/Aist.xcodeproj/
+Apps/iOS/Aist/Info.plist

@@ -6,7 +6,7 @@ let swift5: [SwiftSetting] = [.swiftLanguageMode(.v5)]
 let package = Package(
     name: "aist",
     defaultLocalization: "zh-Hans",
-    platforms: [.macOS(.v15), .iOS(.v18)],
+    platforms: [.macOS(.v15), .iOS(.v16)],
     products: [
         .library(name: "AistCore", targets: ["AistCore"]),
         .executable(name: "AistMac", targets: ["AistMac"]),

@@ -23,9 +23,15 @@ public struct LLMConfig: Codable, Sendable {
 
     public static let keychainService = "com.aist.llm-api-key"
 
+    /// macOS: ~/.config/aist/config.json (shared with aist-cli). iOS: the app's Application Support.
     public static var fileURL: URL {
+        #if os(macOS)
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/aist/config.json")
+        #else
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("aist/config.json")
+        #endif
     }
 
     public static let `default` = LLMConfig(

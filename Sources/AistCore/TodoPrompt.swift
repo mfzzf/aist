@@ -12,6 +12,8 @@ public enum TodoPrompt {
         case screenshot
         case email
         case meeting
+        /// Something the user typed or said into the phone themselves ("明天下午提醒我给 Kevin 回报价").
+        case note
     }
 
     /// System prompt for screenshot / email extraction.
@@ -41,6 +43,7 @@ public enum TodoPrompt {
         case .screenshot: "一张屏幕截图"
         case .email: "一封邮件"
         case .meeting: "一场会议的转写"
+        case .note: "用户自己随手记下的一段话（打字或语音转写）"
         }
         return """
         你是 Aist，用户的私人待办助理。用户很忙，消息、邮件、会议里别人交代的事常常转头就忘。你会收到\(input)，任务是找出其中【用户本人接下来需要去做】的事，写成能直接放进待办清单的条目。
@@ -167,6 +170,19 @@ public enum TodoPrompt {
             - 正文提到附件或图片里的内容但你看不到时，按能看到的文字判断。
             - 纯广告、营销、订阅资讯、自动生成的账单/报表/告警且不需要用户采取行动时，返回空。
             source 填「邮件」。
+            """
+        case .note:
+            """
+            ## 这次是用户自己记的一段话
+            这是用户本人对着手机打字或说话记下来的，不是别人发来的消息。读法和上面不同：
+            - 用户说要做的、提醒自己的、答应别人的，都是用户的待办（第 1 条默认成立）；明确说是别人要做的（「让小王去订会议室」）记成用户的跟进：「跟进小王订会议室」。
+            - 一段话里可能有好几件事，一件事一条；同一件事的细节合并。纯粹的想法、感受、备忘信息（「Kevin 的电话是…」）不记，除非里面有要做的事。
+            - 语音转写会有口头禅（嗯、那个、就是）、重复和错字、中英马来文混杂，按意思还原，title 写干净的说法。
+            - 「提醒我」「记得」「别忘了」后面的就是事情本身；「明天下午」「周五前」「下周一早上」等按当前时间换算成 due_at。只说了日期没说时间的，due_at 用当天 09:00。
+            - requester：用户转述别人交代的（「老板让我…」「Kevin 要我…」）填那个人；否则为 null。
+            - evidence 摘录用户原话里对应的那一句。
+            - priority 按用户的语气和期限判断：「急」「马上」「今天必须」为 high。
+            source 填「随手记」。
             """
         case .meeting:
             """

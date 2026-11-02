@@ -1,0 +1,46 @@
+# XcodeGen spec for the iOS app: `xcodegen` here generates Aist.xcodeproj (not committed).
+name: Aist
+options:
+  deploymentTarget:
+    iOS: "16.0"
+  developmentLanguage: zh-Hans
+  createIntermediateGroups: true
+packages:
+  aist:
+    path: ../..
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: 7MNRRP3W76
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Aist:
+    type: application
+    platform: iOS
+    sources:
+      - Aist
+    dependencies:
+      - package: aist
+        product: AistCore
+    info:
+      path: Aist/Info.plist
+      properties:
+        CFBundleDisplayName: Aist
+        CFBundleDevelopmentRegion: zh-Hans
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSMicrophoneUsageDescription: 按住说话时录音，转成文字后整理成待办。
+        NSSpeechRecognitionUsageDescription: 把你说的话转成文字，再整理成待办。
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mfzzf.aist
+        PRODUCT_NAME: Aist
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor

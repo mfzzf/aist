@@ -100,6 +100,17 @@ public struct TodoExtractor: Sendable {
         ))
     }
 
+    /// Extracts to-dos from something the user typed or dictated into the phone.
+    public func extract(note: String, existing: [TodoItem],
+                        now: Date = .now, timeZone: TimeZone = .current) async throws -> [ExtractedTodo] {
+        let text = "已有待办：\(Self.existingJSON(existing))\n\n用户记下的话：\n\(note.prefix(12_000))"
+        return try Self.parse(await client.callTool(
+            system: TodoPrompt.extraction(.note, identity: identity, now: now, timeZone: timeZone),
+            parts: [.text(text)],
+            tool: TodoPrompt.recordTodos
+        ))
+    }
+
     // MARK: - Prompt
 
     static func calendarTable(now: Date, timeZone: TimeZone) -> String {
