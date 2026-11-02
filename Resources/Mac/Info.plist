@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.jianfengmei.aist</string>
+	<key>CFBundleName</key>
+	<string>Aist</string>
+	<key>CFBundleDisplayName</key>
+	<string>Aist</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleExecutable</key>
+	<string>aist</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.1</string>
+	<key>CFBundleVersion</key>
+	<string>3</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hans</string>
+		<string>en</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Aist 会读取你的日程，在会议开始时提醒录音，并把待办安排进日历。</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Aist 会读取你的日程，在会议开始时提醒录音，并把待办安排进日历。</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Aist 会把待办同步到「提醒事项」，通过 iCloud 出现在你的 iPhone 和 Apple Watch 上。</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Aist 会把待办同步到「提醒事项」，通过 iCloud 出现在你的 iPhone 和 Apple Watch 上。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Aist 会在你开始会议录音时使用麦克风，录音和转写只保存在这台 Mac 上。</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+</dict>
+</plist>
