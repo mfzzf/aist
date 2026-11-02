@@ -31,13 +31,27 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSMicrophoneUsageDescription: 按住说话时录音，转成文字后整理成待办。
         NSSpeechRecognitionUsageDescription: 把你说的话转成文字，再整理成待办。
+        NSCameraUsageDescription: 拍下海报、单据、白板，让 AI 从照片里整理待办。
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
+        # Silent pushes from CloudKit when the other device changes a to-do.
+        UIBackgroundModes: [remote-notification]
+        # Tells CloudSync this build carries the iCloud entitlement (iOS can't look it up).
+        AistCloudKit: true
+    entitlements:
+      path: Aist/Aist.entitlements
+      properties:
+        aps-environment: development
+        com.apple.developer.icloud-container-identifiers: [iCloud.com.mfzzf.aist]
+        com.apple.developer.icloud-services: [CloudKit]
+        # Same database as the Mac app (Developer ID builds can only use Production).
+        com.apple.developer.icloud-container-environment: $(AIST_CLOUD_ENV)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mfzzf.aist
+        AIST_CLOUD_ENV: Production
         PRODUCT_NAME: Aist
         MARKETING_VERSION: 0.1.0
         CURRENT_PROJECT_VERSION: 1

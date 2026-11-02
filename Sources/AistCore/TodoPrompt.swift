@@ -98,20 +98,27 @@ public enum TodoPrompt {
         - source：来源渠道（如「企业微信」「邮件」「会议」「Slack」）。
         - priority：见下面「主动一点」。
         - evidence：从原文里原样摘录最能说明这件事的一句（不超过 120 字）。
+        - details：把原文里和这件事有关、title 装不下的具体信息尽量都留下来，办事时不用再翻原文：人（谁、联系方式、电话、邮箱、账号）、地点/地址/会议室/会议链接、金额/数量/规格、单号/编号/版本号、链接、要带/要准备的东西、对方的具体要求和约束。分行写成「电话：0123456789」「地点：3 楼大会议室」这样的短条目；照抄原文里的号码、链接和专有名词，不要改写。没有额外信息为 null。
         """
 
     static func time(now: Date, timeZone: TimeZone) -> String {
+        """
+        \(clock(now: now, timeZone: timeZone))
+        - due_at 用 ISO 8601，带时区偏移。due_text 保留原文说法（如「周三前」「EOD」）。
+        - 「今天内」「EOD」= 今天 23:59；只有日期没有钟点 = 当天 18:00；「下周」没说哪天 = 下周一 18:00；会议/活动取开始时间。
+        - 原文没提时间就为 null，不要猜。消息里的时间戳是发送时间，不是截止时间。
+        """
+    }
+
+    /// The current moment plus a weekday lookup table (see `calendarTable`).
+    static func clock(now: Date, timeZone: TimeZone) -> String {
         let fmt = ISO8601DateFormatter()
         fmt.timeZone = timeZone
         fmt.formatOptions = [.withInternetDateTime]
         let weekday = now.formatted(Date.FormatStyle(timeZone: timeZone).weekday(.wide).locale(Locale(identifier: "zh_CN")))
         return """
         ## 时间
-        现在是 \(fmt.string(from: now))（\(weekday)），时区 \(timeZone.identifier)。
-        - due_at 用 ISO 8601，带时区偏移。due_text 保留原文说法（如「周三前」「EOD」）。
-        - 「今天内」「EOD」= 今天 23:59；只有日期没有钟点 = 当天 18:00；「下周」没说哪天 = 下周一 18:00；会议/活动取开始时间。
-        - 原文没提时间就为 null，不要猜。消息里的时间戳是发送时间，不是截止时间。
-        - 说到星期几时，取下表中最近的那一天：
+        现在是 \(fmt.string(from: now))（\(weekday)），时区 \(timeZone.identifier)。说到星期几时，取下表中最近的那一天：
         \(calendarTable(now: now, timeZone: timeZone))
         """
     }
@@ -176,9 +183,11 @@ public enum TodoPrompt {
             ## 这次是用户自己记的一段话
             这是用户本人对着手机打字或说话记下来的，不是别人发来的消息。读法和上面不同：
             - 用户说要做的、提醒自己的、答应别人的，都是用户的待办（第 1 条默认成立）；明确说是别人要做的（「让小王去订会议室」）记成用户的跟进：「跟进小王订会议室」。
-            - 一段话里可能有好几件事，一件事一条；同一件事的细节合并。纯粹的想法、感受、备忘信息（「Kevin 的电话是…」）不记，除非里面有要做的事。
+            - 一段话里可能有好几件事，一件事一条；同一件事的细节合并。
+            - 尽量多留信息：用户顺口说的电话、地址、金额、单号、要带的东西，都写进对应那条的 details。单独一句备忘（「Kevin 的电话是 0123…」）不单独记成待办，而是放进最相关的那条（新记的或已有的「把报价发给 Kevin」）的 details；实在没有相关的，在 reply 里提一句没地方放。
+            - 时间线索都要用上：「下班前」= 当天 18:00，「月底」= 当月最后一天 18:00，「过两天」= 两天后 18:00，「周末」= 本周六 10:00；due_text 保留原话。
             - 语音转写会有口头禅（嗯、那个、就是）、重复和错字、中英马来文混杂，按意思还原，title 写干净的说法。
-            - 「提醒我」「记得」「别忘了」后面的就是事情本身；「明天下午」「周五前」「下周一早上」等按当前时间换算成 due_at。只说了日期没说时间的，due_at 用当天 09:00。
+            - 「提醒我」「记得」「别忘了」后面的就是事情本身；「明天下午」「周五前」「下周一早上」等按当前时间换算成 due_at。只说了日期没说时间的，due_at 用当天 18:00。
             - requester：用户转述别人交代的（「老板让我…」「Kevin 要我…」）填那个人；否则为 null。
             - evidence 摘录用户原话里对应的那一句。
             - priority 按用户的语气和期限判断：「急」「马上」「今天必须」为 high。
@@ -219,7 +228,7 @@ public enum TodoPrompt {
     /// One to-do, shared by record_todos and record_minutes.my_todos.
     static let todoItemSchema = """
         {"type": "object", "additionalProperties": false,
-         "required": ["title", "requester", "source", "due_text", "due_at", "priority", "evidence", "duplicate_of", "suggestion"],
+         "required": ["title", "requester", "source", "due_text", "due_at", "priority", "evidence", "details", "duplicate_of", "suggestion"],
          "properties": {
            "title": {"type": "string", "description": "中文动宾短语，不超过 18 字，写具体动作和对象"},
            "requester": {"type": ["string", "null"], "description": "交代这件事的人；用户自己定的为 null"},
@@ -228,6 +237,7 @@ public enum TodoPrompt {
            "due_at": {"type": ["string", "null"], "description": "ISO 8601 截止时间，带时区偏移；原文没提为 null"},
            "priority": {"type": "string", "enum": ["high", "medium", "low"]},
            "evidence": {"type": "string", "description": "原文中最能说明这件事的一句，原样摘录，不超过 120 字"},
+           "details": {"type": ["string", "null"], "description": "原文里和这件事有关的具体信息，分行短条目：联系人/电话/地址/金额/单号/链接/要带的东西/对方要求；照抄号码和链接；没有为 null"},
            "duplicate_of": {"type": ["string", "null"], "description": "与「已有待办」是同一件事时填那条的 id"},
            "suggestion": {"type": ["string", "null"], "description": "1～2 句具体可执行的下一步建议（先看哪里、可能原因、找谁）；没有更多信息为 null"}
          }}

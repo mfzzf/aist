@@ -47,7 +47,7 @@ struct TodoDetail: View {
                         }
                     }
 
-                    Section("备注") {
+                    Section("详情与备注") {
                         TextField("添加备注", text: Binding(get: { item.notes ?? "" }, set: { store.setNotes(id, $0) }),
                                   axis: .vertical)
                             .lineLimit(3 ... 10)

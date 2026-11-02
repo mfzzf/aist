@@ -1,4 +1,5 @@
 import AistCore
+import PhotosUI
 import SwiftUI
 
 /// The bar at the bottom of the home screen: type and send, or hold the mic and talk.
@@ -15,11 +16,22 @@ struct Composer: View {
     @State private var hint: String?
     @GestureState private var holding = false
     @Namespace private var glassSpace
+    @State private var attachments: [Attachment] = []
+    @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var showPicker = false
+    @State private var showCamera = false
 
     enum Arm { case send, cancel, edit }
 
+    /// A picked or pasted image: the JPEG that goes to the AI and a small preview.
+    struct Attachment: Identifiable, Equatable {
+        let id = UUID()
+        let jpeg: Data
+        let thumbnail: UIImage
+    }
+
     private var listening: Bool { recorder.isRecording }
-    private var canSend: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var canSend: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty }
 
     var body: some View {
         GlassGroup(spacing: 6) {
@@ -36,6 +48,7 @@ struct Composer: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .bottom)))
                 }
                 HStack(alignment: .bottom, spacing: 10) {
+                    if !listening { attachButton }
                     field
                     actionButton
                 }
@@ -58,6 +71,23 @@ struct Composer: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: arm)
         .animation(.easeOut(duration: 0.2), value: hint)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: canSend)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: attachments)
+        .photosPicker(isPresented: $showPicker, selection: $pickerItems, maxSelectionCount: 6, matching: .images)
+        .onChange(of: pickerItems) { items in
+            guard !items.isEmpty else { return }
+            Task {
+                for item in items {
+                    if let data = try? await item.loadTransferable(type: Data.self) { attach(data) }
+                }
+                pickerItems = []
+            }
+        }
+        .fullScreenCover(isPresented: $showCamera) {
+            CameraPicker { data in attach(data) }.ignoresSafeArea()
+        }
+        .onAppear {
+            if Demo.attachments, let icon = UIImage(named: "Mascot")?.pngData() { attach(icon); attach(icon) }
+        }
         .onAppear { if Demo.listening { recorder.startDemo() } }
         .onChange(of: holding) { isHolding in
             // The gesture can be cancelled without onEnded (a call comes in, the app goes away).
@@ -77,19 +107,82 @@ struct Composer: View {
                     .padding(.vertical, 13)
                     .transition(.opacity)
             } else {
-                TextField("记点什么，或按住麦克风说话", text: $text, axis: .vertical)
+                VStack(alignment: .leading, spacing: 0) {
+                    if !attachments.isEmpty { thumbnails }
+                TextField(attachments.isEmpty ? "记点什么，或按住麦克风说话" : "说说要做什么（可以不写）", text: $text, axis: .vertical)
                     .lineLimit(1 ... 6)
                     .focused($focused)
-                    .submitLabel(.send)
-                    .onSubmit(send)
+                    // Return starts a new line: one line per thing, sent together with the arrow.
                     .padding(.horizontal, 18)
                     .padding(.vertical, 13)
-                    .transition(.opacity)
+                }
+                .transition(.opacity)
             }
         }
         .frame(minHeight: 50)
         .glass(in: RoundedRectangle(cornerRadius: 25, style: .continuous), interactive: true)
         .glassID("field", in: glassSpace)
+    }
+
+    private var thumbnails: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { a in
+                    Image(uiImage: a.thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(alignment: .topTrailing) {
+                            Button { attachments.removeAll { $0.id == a.id } } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 18))
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, .black.opacity(0.55))
+                            }
+                            .offset(x: 5, y: -5)
+                            .accessibilityLabel("移除图片")
+                        }
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.trailing, 6)
+        }
+    }
+
+    private var attachButton: some View {
+        Menu {
+            Button { showPicker = true } label: { Label("照片", systemImage: "photo.on.rectangle") }
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                Button { showCamera = true } label: { Label("拍照", systemImage: "camera") }
+            }
+            if UIPasteboard.general.hasImages {
+                Button { UIPasteboard.general.images?.compactMap { $0.pngData() }.forEach(attach) } label: {
+                    Label("粘贴图片", systemImage: "doc.on.clipboard")
+                }
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 50, height: 50)
+                .contentShape(Circle())
+        }
+        .glass(in: Circle(), interactive: true)
+        .glassID("attach", in: glassSpace)
+        .accessibilityLabel("添加图片")
+        .transition(.scale.combined(with: .opacity))
+    }
+
+    /// Any image bytes → upright JPEG for the AI, plus a preview.
+    private func attach(_ data: Data) {
+        guard attachments.count < 6,
+              let jpeg = try? ImageCodec.jpeg(fromImageData: data),
+              let small = try? ImageCodec.jpeg(fromImageData: data, maxDimension: 200),
+              let thumbnail = UIImage(data: small) else { return }
+        attachments.append(Attachment(jpeg: jpeg, thumbnail: thumbnail))
     }
 
     private var armLabel: String {
@@ -163,8 +256,9 @@ struct Composer: View {
 
     private func send() {
         guard canSend else { return }
-        inbox.submit(text, voice: false)
+        inbox.submit(text, voice: false, images: attachments.map(\.jpeg))
         text = ""
+        attachments = []
     }
 
     private func begin() {
@@ -199,12 +293,13 @@ struct Composer: View {
         }
         Task {
             let said = await recorder.stop()
-            guard !said.isEmpty else { hint("没听清，再说一次"); return }
+            guard !said.isEmpty || !attachments.isEmpty else { hint("没听清，再说一次"); return }
             if action == .edit {
                 text = said
                 focused = true
             } else {
-                inbox.submit(said, voice: true)
+                inbox.submit(said, voice: true, images: attachments.map(\.jpeg))
+                attachments = []
             }
         }
     }
@@ -283,109 +378,34 @@ private struct Waveform: View {
     }
 }
 
-/// Above the bar: 「正在整理…」, then what came out of it (with undo), or why it didn't work.
-struct InboxCard: View {
-    @EnvironmentObject private var inbox: Inbox
-    @EnvironmentObject private var store: TodoStore
-    var openSettings: () -> Void
+/// The system camera, for photographing a poster, a receipt, a whiteboard.
+private struct CameraPicker: UIViewControllerRepresentable {
+    let onImage: (Data) -> Void
+    @Environment(\.dismiss) private var dismiss
 
-    var body: some View {
-        Group {
-            if let note = inbox.working {
-                row {
-                    ProgressView().controlSize(.small)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("正在整理…").font(.subheadline.weight(.semibold))
-                        Text(note.text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
-            } else if let outcome = inbox.outcome {
-                content(for: outcome)
-            } else if !inbox.pending.isEmpty {
-                row {
-                    Image(systemName: "tray.full").foregroundStyle(.secondary)
-                    Text("\(inbox.pending.count) 条等待整理").font(.subheadline)
-                    Spacer()
-                    Button("重试") { Task { await inbox.process() } }.font(.subheadline.weight(.semibold))
-                }
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ controller: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: CameraPicker
+        init(_ parent: CameraPicker) { self.parent = parent }
+
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let image = info[.originalImage] as? UIImage, let data = image.jpegData(compressionQuality: 0.9) {
+                parent.onImage(data)
             }
+            parent.dismiss()
         }
-        .padding(.horizontal, 14)
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: inbox.outcome)
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: inbox.working)
-    }
 
-    @ViewBuilder
-    private func content(for outcome: Inbox.Outcome) -> some View {
-        switch outcome {
-        case let .added(_, added, updated):
-            let titles = (added + updated).compactMap { id in store.items.first { $0.id == id }?.title }
-            row {
-                Image(systemName: "checkmark.circle.fill").font(.title3).foregroundStyle(.white, .green)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(summary(added: added.count, updated: updated.count)).font(.subheadline.weight(.semibold))
-                    ForEach(titles.prefix(3), id: \.self) { t in
-                        Text(t).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
-                Spacer()
-                if !added.isEmpty {
-                    Button("撤销") { inbox.undo(added) }.font(.subheadline.weight(.semibold))
-                }
-            }
-            .task(id: outcome) { await autoDismiss(outcome) }
-        case let .nothing(text):
-            row {
-                Image(systemName: "text.bubble").foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("没有发现要做的事").font(.subheadline.weight(.semibold))
-                    Text(text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Spacer()
-                Button("记成待办") { inbox.keepAsTodo(text) }.font(.subheadline.weight(.semibold))
-            }
-            .task(id: outcome) { await autoDismiss(outcome) }
-        case let .failed(id, message, needsSetup):
-            row {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("没能整理").font(.subheadline.weight(.semibold))
-                    Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
-                Spacer()
-                if needsSetup {
-                    Button("去设置", action: openSettings).font(.subheadline.weight(.semibold))
-                } else {
-                    Button("重试") { Task { await inbox.process() } }.font(.subheadline.weight(.semibold))
-                }
-                Menu {
-                    Button("放弃这条", role: .destructive) { inbox.discard(id) }
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: 28, height: 28)
-                }
-            }
-        }
-    }
-
-    private func summary(added: Int, updated: Int) -> String {
-        switch (added, updated) {
-        case (0, _): "更新了 \(updated) 项待办"
-        case (_, 0): "新增 \(added) 项待办"
-        default: "新增 \(added) 项，更新 \(updated) 项"
-        }
-    }
-
-    private func autoDismiss(_ outcome: Inbox.Outcome) async {
-        try? await Task.sleep(nanoseconds: 6_000_000_000)
-        if inbox.outcome == outcome { inbox.outcome = nil }
-    }
-
-    private func row<C: View>(@ViewBuilder _ content: () -> C) -> some View {
-        HStack(alignment: .center, spacing: 12) { content() }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .glass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { parent.dismiss() }
     }
 }

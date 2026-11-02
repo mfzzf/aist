@@ -135,6 +135,9 @@ struct TodoRow: View {
                 Text(text).foregroundStyle(.secondary)
             }
             if let who = item.requester { Text(who).foregroundStyle(.secondary) }
+            if let notes = item.notes, !notes.isEmpty {
+                Image(systemName: "text.alignleft").foregroundStyle(.secondary)
+            }
             if item.suggestion != nil, !done {
                 Image(systemName: "sparkles").foregroundStyle(AistBrand.violet)
             }
@@ -142,7 +145,7 @@ struct TodoRow: View {
         .font(.caption)
         .lineLimit(1)
         if item.pinned == true || item.priority == .high || item.dueAt != nil || item.dueText != nil
-            || item.requester != nil || item.suggestion != nil {
+            || item.requester != nil || item.suggestion != nil || !(item.notes ?? "").isEmpty {
             parts
         }
     }

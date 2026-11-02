@@ -13,9 +13,11 @@ public struct ExtractedTodo: Codable, Sendable, Equatable {
     public var duplicateOf: String?
     /// The AI's suggested next step.
     public var suggestion: String?
+    /// Specifics from the source the title can't hold: contacts, place, amounts, numbers, links (one per line).
+    public var details: String?
 
     enum CodingKeys: String, CodingKey {
-        case title, requester, source, priority, evidence, suggestion
+        case title, requester, source, priority, evidence, suggestion, details
         case dueText = "due_text"
         case dueAt = "due_at"
         case duplicateOf = "duplicate_of"
@@ -23,8 +25,9 @@ public struct ExtractedTodo: Codable, Sendable, Equatable {
 
     public init(title: String, requester: String? = nil, source: String? = nil, dueText: String? = nil,
                 dueAt: String? = nil, priority: TodoPriority? = nil, evidence: String? = nil,
-                duplicateOf: String? = nil, suggestion: String? = nil) {
+                duplicateOf: String? = nil, suggestion: String? = nil, details: String? = nil) {
         self.suggestion = suggestion
+        self.details = details
         self.title = title
         self.requester = requester
         self.source = source

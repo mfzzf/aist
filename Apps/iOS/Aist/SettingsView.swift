@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var cloud: CloudSync
     @State private var state = LLMProviderStore.load()
     @State private var key = ""
     @State private var models: [LLMModelInfo] = []
@@ -50,6 +51,21 @@ struct SettingsView: View {
                     Text("你的名字")
                 } footer: {
                     Text("中文名、英文名、常用称呼，用逗号分开。别人提到这些名字时，AI 知道说的是你。")
+                }
+
+                Section {
+                    LabeledContent("iCloud 同步") {
+                        HStack(spacing: 6) {
+                            if cloud.status == .syncing { ProgressView().controlSize(.small) }
+                            Text(cloud.statusText).foregroundStyle(.secondary)
+                        }
+                    }
+                    if cloud.isEnabled {
+                        Button("立即同步") { cloud.sync() }
+                            .disabled(cloud.status == .syncing)
+                    }
+                } footer: {
+                    Text("待办在登录同一 Apple 账号的 iPhone 和 Mac 之间自动同步，存在你自己的 iCloud 里。")
                 }
 
                 Section("语音") {

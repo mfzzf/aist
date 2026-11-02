@@ -7,7 +7,7 @@ import SwiftUI
 /// Settings window, macOS-style: a toolbar of panes (通用 / 连接 / AI), each a grouped Form.
 enum SettingsWindow {
     @MainActor
-    static func make(reminders: RemindersSync, calendar: CalendarCenter, notifier: EventNotifier, mailTodos: MailAutoTodo, github: GitHubCenter, wecom: WeComCenter) -> NSWindow {
+    static func make(cloud: CloudSync, reminders: RemindersSync, calendar: CalendarCenter, notifier: EventNotifier, mailTodos: MailAutoTodo, github: GitHubCenter, wecom: WeComCenter) -> NSWindow {
         let tabs = NSTabViewController()
         tabs.tabStyle = .toolbar
         tabs.canPropagateSelectedChildViewControllerTitle = true
@@ -20,7 +20,7 @@ enum SettingsWindow {
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
             tabs.addTabViewItem(item)
         }
-        pane("通用", "gearshape", GeneralSettings(reminders: reminders, calendar: calendar, notifier: notifier, mailTodos: mailTodos))
+        pane("通用", "gearshape", GeneralSettings(cloud: cloud, reminders: reminders, calendar: calendar, notifier: notifier, mailTodos: mailTodos))
         pane("连接", "link", ConnectionSettings(github: github, wecom: wecom))
         pane("AI", "sparkles", AISettings(), width: 700)
         let window = NSWindow(contentViewController: tabs)
@@ -91,6 +91,7 @@ private struct UpdateSection: View {
 }
 
 private struct GeneralSettings: View {
+    @ObservedObject var cloud: CloudSync
     @ObservedObject var reminders: RemindersSync
     @ObservedObject var calendar: CalendarCenter
     @ObservedObject var notifier: EventNotifier
@@ -188,6 +189,22 @@ private struct GeneralSettings: View {
                     }
                 } else {
                     Text("包括企业微信和「日历」App 里的日程。企业微信每 2 分钟自动刷新一次。").foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                LabeledContent {
+                    HStack(spacing: 8) {
+                        if cloud.status == .syncing { ProgressView().controlSize(.small) }
+                        Text(cloud.statusText).foregroundStyle(.secondary)
+                        if cloud.isEnabled {
+                            Button("立即同步") { cloud.sync() }
+                                .disabled(cloud.status == .syncing)
+                        }
+                    }
+                } label: {
+                    Text("iCloud 同步")
+                    Text("和 iPhone 上的 Aist 共用一份待办，存在你自己的 iCloud 里")
                 }
             }
 

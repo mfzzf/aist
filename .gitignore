@@ -6,3 +6,4 @@ build/
 xcuserdata/
 Apps/iOS/Aist.xcodeproj/
 Apps/iOS/Aist/Info.plist
+Apps/iOS/Aist/Aist.entitlements

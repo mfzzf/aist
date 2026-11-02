@@ -1,12 +1,17 @@
 import Combine
 import Foundation
 
-/// Local to-do list persisted as JSON. (iCloud sync replaces the storage layer in M3.)
+/// Local to-do list persisted as JSON; `CloudSync` mirrors it to iCloud.
 @MainActor
 public final class TodoStore: ObservableObject {
     @Published public private(set) var items: [TodoItem] = []
 
+    /// After every local edit is saved: ids added or changed, ids removed. Not called for `applyRemote`.
+    public var onLocalChange: ((_ changed: Set<UUID>, _ deleted: Set<UUID>) -> Void)?
+
     private let fileURL: URL
+    /// The items as last saved, to tell what an edit changed.
+    private var snapshot: [UUID: TodoItem] = [:]
 
     public init(fileURL: URL = TodoStore.defaultURL) {
         self.fileURL = fileURL
@@ -14,6 +19,25 @@ public final class TodoStore: ObservableObject {
            let decoded = try? Self.decoder.decode([TodoItem].self, from: data) {
             items = decoded
         }
+        snapshot = Self.index(items)
+    }
+
+    /// Changes that came from another device: written as-is, not reported back to the sync.
+    public func applyRemote(upserts: [TodoItem], deletions: Set<UUID>) {
+        guard !upserts.isEmpty || !deletions.isEmpty else { return }
+        for item in upserts {
+            if let i = items.firstIndex(where: { $0.id == item.id }) {
+                if items[i] != item { items[i] = item }
+            } else {
+                items.append(item)
+            }
+        }
+        if !deletions.isEmpty { items.removeAll { deletions.contains($0.id) } }
+        save(notify: false)
+    }
+
+    private static func index(_ items: [TodoItem]) -> [UUID: TodoItem] {
+        Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
     }
 
     public nonisolated static var defaultURL: URL {
@@ -39,8 +63,12 @@ public final class TodoStore: ObservableObject {
 
     /// Open to-dos, most urgent first (see `urgencyRank`), then earliest deadline, then newest.
     public var openItems: [TodoItem] {
-        let now = Date.now
-        return items.filter { $0.status == .open }.sorted {
+        Self.screenOrder(items.filter { $0.status == .open })
+    }
+
+    /// The order on screen: most urgent first (see `urgencyRank`), then earliest deadline, then newest.
+    public nonisolated static func screenOrder(_ open: [TodoItem], now: Date = .now) -> [TodoItem] {
+        open.sorted {
             let ra = Self.urgencyRank($0, now: now), rb = Self.urgencyRank($1, now: now)
             if ra != rb { return ra < rb }
             switch ($0.dueAt, $1.dueAt) {
@@ -97,6 +125,7 @@ public final class TodoStore: ObservableObject {
                 // A repeat (another CI failure, a follow-up email) carries the newest read on the matter.
                 if let tip = e.suggestion, !tip.isEmpty { item.suggestion = tip }
                 if let ev = e.evidence, !ev.isEmpty, item.evidence != ev, item.origin == origin { item.evidence = ev }
+                item.notes = Self.merging(e.details, into: item.notes)
                 if item != before {
                     item.updatedAt = now
                     items[i] = item
@@ -111,6 +140,7 @@ public final class TodoStore: ObservableObject {
                 item.meetingID = meetingID
                 item.emailRef = emailRef
                 item.suggestion = e.suggestion
+                item.notes = Self.merging(e.details, into: nil)
                 items.append(item)
                 result.added.append(item.id)
             }
@@ -164,6 +194,7 @@ public final class TodoStore: ObservableObject {
         guard let i = items.firstIndex(where: { $0.id == id }) else { return }
         items[i].recordings?.removeAll { $0.id == recordingID }
         if items[i].recordings?.isEmpty == true { items[i].recordings = nil }
+        items[i].updatedAt = .now
         save()
         try? FileManager.default.removeItem(at: Self.folder(for: recordingID))
     }
@@ -202,13 +233,31 @@ public final class TodoStore: ObservableObject {
         save()
     }
 
-    private func save() {
+    private func save(notify: Bool = true) {
         do {
             try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Self.encoder.encode(items).write(to: fileURL, options: .atomic)
         } catch {
             NSLog("aist: failed to save todos: \(error)")
         }
+        let current = Self.index(items)
+        if notify, let onLocalChange {
+            let changed = Set(current.compactMap { id, item in snapshot[id] == item ? nil : id })
+            let deleted = Set(snapshot.keys).subtracting(current.keys)
+            if !changed.isEmpty || !deleted.isEmpty { onLocalChange(changed, deleted) }
+        }
+        snapshot = current
+    }
+
+    /// Adds the AI's details to a to-do's notes, skipping lines that are already there.
+    public nonisolated static func merging(_ details: String?, into notes: String?) -> String? {
+        let new = (details ?? "").split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !(notes ?? "").contains($0) }
+        guard !new.isEmpty else { return notes }
+        let base = (notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let added = new.joined(separator: "\n")
+        return base.isEmpty ? added : base + "\n" + added
     }
 
     private static func normalize(_ s: String) -> String {

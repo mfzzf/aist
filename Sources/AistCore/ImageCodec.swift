@@ -18,6 +18,19 @@ public enum ImageCodec {
         return data as Data
     }
 
+    /// Any image file's bytes (HEIC, PNG, JPEG…) → upright JPEG no larger than `maxDimension`.
+    /// Uses the EXIF orientation, so photos taken sideways reach the model the right way up.
+    public static func jpeg(fromImageData data: Data, maxDimension: Int = 2048, quality: Double = 0.8) throws -> Data {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: maxDimension,
+              ] as CFDictionary)
+        else { throw CodecError.decodeFailed }
+        return try jpeg(image, maxDimension: maxDimension, quality: quality)
+    }
+
     public static func load(_ url: URL) throws -> CGImage {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(src, 0, nil)

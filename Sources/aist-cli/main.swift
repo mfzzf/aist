@@ -8,7 +8,7 @@ import Foundation
 // For trying other providers: AIST_BASE_URL, AIST_MODEL, AIST_FORMAT (anthropic|openai), AIST_API_KEY.
 
 let args = CommandLine.arguments
-guard args.count >= 3, ["extract", "email", "chat", "meeting", "note"].contains(args[1]) else {
+guard args.count >= 3, ["extract", "email", "chat", "meeting", "note", "assist"].contains(args[1]) else {
     FileHandle.standardError.write(Data("usage: aist-cli extract <image> [--app <name>] | email|note <file>  [--me <names>]\n".utf8))
     exit(2)
 }
@@ -57,6 +57,38 @@ do {
     if args[1] == "chat" {
         let text = try String(contentsOfFile: args[2], encoding: .utf8)
         todos = try await extractor.extract(chatText: text, app: frontApp ?? "企业微信")
+    } else if args[1] == "assist" {
+        // The phone's input bar: intents against an optional todos.json (--todos).
+        let text = try String(contentsOfFile: args[2], encoding: .utf8)
+        var existing: [TodoItem] = []
+        if let i = args.firstIndex(of: "--todos"), i + 1 < args.count {
+            let d = JSONDecoder()
+            d.dateDecodingStrategy = .iso8601
+            existing = try d.decode([TodoItem].self, from: Data(contentsOf: URL(fileURLWithPath: args[i + 1])))
+        }
+        // --recent <file>: earlier exchanges as alternating lines "用户说：…" / "你做了：…".
+        var recent: [NoteAssistant.Turn] = []
+        if let i = args.firstIndex(of: "--recent"), i + 1 < args.count {
+            var said: String?
+            for line in try String(contentsOfFile: args[i + 1], encoding: .utf8).split(separator: "\n") {
+                if line.hasPrefix("用户说：") {
+                    said = String(line.dropFirst(4))
+                } else if line.hasPrefix("你做了："), let s = said {
+                    recent.append(NoteAssistant.Turn(said: s, did: String(line.dropFirst(4)), at: Date().addingTimeInterval(-120)))
+                    said = nil
+                }
+            }
+        }
+        // --image <file> (repeatable): attached photos / screenshots.
+        let images = try args.indices.filter { args[$0] == "--image" && $0 + 1 < args.count }
+            .map { try ImageCodec.jpeg(fromImageData: Data(contentsOf: URL(fileURLWithPath: args[$0 + 1]))) }
+        let result = try await NoteAssistant(client: LLMClient(config: config), identity: me)
+            .handle(text, images: images, todos: existing, recent: recent)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+        print(String(decoding: try encoder.encode(result), as: UTF8.self))
+        FileHandle.standardError.write(Data(String(format: "%@ · %.1fs\n", config.model, Date().timeIntervalSince(started)).utf8))
+        exit(0)
     } else if args[1] == "note" {
         let text = try String(contentsOfFile: args[2], encoding: .utf8)
         todos = try await extractor.extract(note: text, existing: [])

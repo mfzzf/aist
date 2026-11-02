@@ -8,6 +8,9 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = TodoStore()
     private let meetings = MeetingStore()
+    /// The to-do list in iCloud, shared with the iPhone app (off unless the build is signed for iCloud).
+    private lazy var cloud = CloudSync(store: store)
+    private var cloudTimer: Timer?
     private let recorder = AudioRecorder()
     private let player = AudioPlayback()
     private let mailAccounts = MailAccountStore()
@@ -47,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The GUI session can reach the login keychain; move the plaintext key there.
         LLMConfig.migrateKeyToKeychain()
         Updater.shared.start()
+        setUpCloudSync()
 
         overlay = PanelController(store: store, meetings: meetings, recorder: recorder)
         overlay.onCapture = { [weak self] in self?.captureAndAnalyze() }
@@ -108,6 +112,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.remindDueSoon()
             }
         }
+    }
+
+    private func setUpCloudSync() {
+        guard cloud.isEnabled else { return }
+        NSApp.registerForRemoteNotifications()
+        cloud.sync()
+        // Pushes can be missed (asleep, offline); poll now and then, and after waking up.
+        cloudTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cloud.sync() }
+        }
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+            .sink { [weak self] _ in self?.cloud.sync() }
+            .store(in: &subscriptions)
+    }
+
+    /// CloudKit's silent push: the iPhone changed something.
+    func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
+        cloud.sync()
     }
 
     /// Clicking aist in the Dock (or opening it again from Finder) brings up the main window.
@@ -558,7 +580,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuSettings() {
         if settingsWindow == nil {
-            settingsWindow = SettingsWindow.make(reminders: reminders, calendar: calendar, notifier: notifier, mailTodos: mailTodos, github: github, wecom: wecom)
+            settingsWindow = SettingsWindow.make(cloud: cloud, reminders: reminders, calendar: calendar, notifier: notifier, mailTodos: mailTodos, github: github, wecom: wecom)
         }
         settingsWindow?.center()
         NSApp.activate()

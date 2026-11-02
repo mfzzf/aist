@@ -63,6 +63,8 @@ struct GlassGroup<Content: View>: View {
 enum Demo {
     static let listening = ProcessInfo.processInfo.arguments.contains("-demoListening")
     static let noGlass = ProcessInfo.processInfo.arguments.contains("-noGlass")
+    static let report = ProcessInfo.processInfo.arguments.contains("-demoReport")
+    static let attachments = ProcessInfo.processInfo.arguments.contains("-demoAttachments")
 }
 
 enum Haptics {

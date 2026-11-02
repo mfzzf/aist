@@ -46,8 +46,19 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 # Developer ID builds are for distribution: hardened runtime + secure timestamp, as notarization requires.
+# iCloud sync needs a Developer ID provisioning profile granting iCloud + push for this app ID; kept out
+# of the repo (it carries the certificate), at $AIST_PROFILE.
+PROFILE=${AIST_PROFILE:-$HOME/.config/aist/Aist_DeveloperID.provisionprofile}
 if [[ $IDENTITY == "Developer ID"* ]]; then
-    SIGN_FLAGS="--force --options runtime --timestamp --entitlements Resources/Mac/Aist.entitlements"
+    ENTITLEMENTS=Resources/Mac/Aist.entitlements
+    if [ -f "$PROFILE" ]; then
+        cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
+        ENTITLEMENTS=Resources/Mac/Aist-iCloud.entitlements
+        echo "embedding $(basename "$PROFILE"): iCloud sync on"
+    else
+        echo "no provisioning profile at $PROFILE: iCloud sync off in this build" >&2
+    fi
+    SIGN_FLAGS="--force --options runtime --timestamp --entitlements $ENTITLEMENTS"
 else
     SIGN_FLAGS="--force --timestamp=none"
 fi
