@@ -86,6 +86,14 @@ xcrun notarytool store-credentials aist-notary \
   --apple-id <Apple ID> --team-id <Team ID> --password <App 专用密码>
 ```
 
+### 发布新版本
+
+1. 改 `Resources/Mac/Info.plist` 里的 `CFBundleShortVersionString` / `CFBundleVersion`
+2. `NOTES_FILE=notes.md ./scripts/package-dmg.sh`，得到 `build/Aist-x.y.z.dmg` 和 `build/latest.json`
+3. `gh release create vx.y.z build/Aist-x.y.z.dmg build/latest.json --notes-file notes.md`
+
+App 读的是 `releases/latest/download/latest.json`（走 GitHub 下载 CDN，不受 API 每小时 60 次的限流），并按里面的 SHA-256 校验下载的 DMG；没有这个文件时退回 GitHub API。
+
 ### 调试提示词
 
 `aist-cli` 用和 App 相同的提示词跑一次分析，不需要权限，适合在 SSH 下迭代：

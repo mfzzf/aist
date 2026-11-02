@@ -1,12 +1,16 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Security
 
 /// Updates from GitHub Releases (github.com/mfzzf/aist): checks the latest release, downloads its DMG,
 /// checks the new app is signed by the same Developer ID team, swaps it in and relaunches.
 ///
-/// No appcast to host: the release itself is the feed. The signature check is what makes this safe —
-/// a DMG that isn't ours (wrong team, broken signature) is refused.
+/// The feed is a `latest.json` attached to each release, read through
+/// `releases/latest/download/…` — a redirect to GitHub's download CDN, not the REST API, so it isn't
+/// subject to the API's 60-requests-an-hour-per-IP limit (offices behind one NAT). The API is the
+/// fallback for releases without the file. The DMG must match the manifest's SHA-256, and the app in it
+/// must be signed by our Developer ID team — a DMG that isn't ours is refused.
 @MainActor
 final class Updater: ObservableObject {
     static let shared = Updater()
@@ -25,6 +29,8 @@ final class Updater: ObservableObject {
         var page: URL
         var dmg: URL
         var size: Int
+        /// Hex SHA-256 of the DMG, when the release has a manifest.
+        var sha256: String?
     }
 
     enum State: Equatable {
@@ -95,6 +101,11 @@ final class Updater: ObservableObject {
                 offered.insert(release.version)
                 offer(release)
             }
+        } catch UpdateError.rateLimited where !userInitiated {
+            // Shared IP used up the API quota; nothing is wrong, try again at the next check.
+            state = .idle
+            lastCheck = .now
+            UserDefaults.standard.set(lastCheck, forKey: Self.lastCheckKey)
         } catch {
             state = .failed(error.localizedDescription)
             if userInitiated { alertFailure(error.localizedDescription) }
@@ -102,6 +113,35 @@ final class Updater: ObservableObject {
     }
 
     private static func fetchLatest() async throws -> Release? {
+        if let release = try? await fetchManifest() { return release }
+        return try await fetchFromAPI()
+    }
+
+    /// `latest.json` from the latest release, e.g.
+    /// `{"version":"0.2.2","notes":"…","dmg":"https://…/Aist-0.2.2.dmg","size":123,"sha256":"…","page":"https://…"}`.
+    private static func fetchManifest() async throws -> Release {
+        var request = URLRequest(url: URL(string: "https://github.com/\(repo)/releases/latest/download/latest.json")!)
+        request.setValue("Aist", forHTTPHeaderField: "User-Agent")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 20
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw UpdateError.malformed }
+        struct Manifest: Decodable {
+            var version: String
+            var notes: String?
+            var dmg: URL
+            var size: Int?
+            var sha256: String?
+            var page: URL?
+        }
+        let m = try JSONDecoder().decode(Manifest.self, from: data)
+        let version = m.version.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        return Release(version: version, notes: m.notes ?? "",
+                       page: m.page ?? URL(string: "https://github.com/\(repo)/releases/tag/v\(version)")!,
+                       dmg: m.dmg, size: m.size ?? 0, sha256: m.sha256?.lowercased())
+    }
+
+    private static func fetchFromAPI() async throws -> Release? {
         var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Aist", forHTTPHeaderField: "User-Agent")
@@ -109,6 +149,8 @@ final class Updater: ObservableObject {
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if status == 404 { return nil } // no releases yet
+        if status == 429 || (status == 403 && (response as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "x-ratelimit-remaining") == "0") { throw UpdateError.rateLimited }
         guard status == 200 else { throw UpdateError.http(status) }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tag = json["tag_name"] as? String,
@@ -194,7 +236,7 @@ final class Updater: ObservableObject {
         }
         do {
             state = .downloading(0)
-            let dmg = try await download(release.dmg, expected: release.size)
+            let dmg = try await download(release.dmg, expected: release.size, sha256: release.sha256)
             state = .installing
             let staged = try await Task.detached { try Self.extractApp(from: dmg) }.value
             try Self.verify(staged)
@@ -205,7 +247,7 @@ final class Updater: ObservableObject {
         }
     }
 
-    private func download(_ url: URL, expected: Int) async throws -> URL {
+    private func download(_ url: URL, expected: Int, sha256: String?) async throws -> URL {
         let (bytes, response) = try await URLSession.shared.bytes(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw UpdateError.http((response as? HTTPURLResponse)?.statusCode ?? 0)
@@ -218,16 +260,26 @@ final class Updater: ObservableObject {
         var buffer = Data()
         buffer.reserveCapacity(1 << 20)
         var written = 0
+        var hasher = SHA256()
         for try await byte in bytes {
             buffer.append(byte)
             if buffer.count >= 1 << 20 {
+                hasher.update(data: buffer)
                 try handle.write(contentsOf: buffer)
                 written += buffer.count
                 buffer.removeAll(keepingCapacity: true)
                 if total > 0 { state = .downloading(Double(written) / Double(total)) }
             }
         }
+        hasher.update(data: buffer)
         try handle.write(contentsOf: buffer)
+        if let sha256 {
+            let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            guard digest == sha256 else {
+                try? FileManager.default.removeItem(at: dest)
+                throw UpdateError.checksum
+            }
+        }
         return dest
     }
 
@@ -315,6 +367,8 @@ final class Updater: ObservableObject {
         case malformed
         case noApp
         case badSignature
+        case checksum
+        case rateLimited
         case tool(String)
 
         var errorDescription: String? {
@@ -323,6 +377,8 @@ final class Updater: ObservableObject {
             case .malformed: "GitHub 上的最新版本没有可用的安装包"
             case .noApp: "安装包里没有找到 Aist"
             case .badSignature: "安装包的签名校验没有通过，已放弃安装"
+            case .checksum: "下载的安装包不完整或被改动过（SHA-256 不符），已放弃安装"
+            case .rateLimited: "GitHub 暂时限制了这个网络的访问次数，过一会儿再试"
             case let .tool(name): "解开安装包失败（\(name)）"
             }
         }

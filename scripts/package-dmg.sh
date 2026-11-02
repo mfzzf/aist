@@ -33,4 +33,25 @@ if eval "$NOTARIZE" 2>/dev/null || scripts/gui-run.sh "$NOTARIZE"; then
 else
     echo "warning: not notarized (no '$NOTARY_PROFILE' notarytool profile?). Gatekeeper will ask before first launch." >&2
 fi
+# Update feed for the app (Updater reads releases/latest/download/latest.json). Written after stapling,
+# which changes the DMG. Release notes come from $NOTES_FILE (Markdown), if given.
+REPO=${AIST_REPO:-mfzzf/aist}
+SIZE=$(stat -f %z "$DMG")
+SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
+NOTES=""
+[ -n "${NOTES_FILE:-}" ] && NOTES=$(cat "$NOTES_FILE")
+VERSION="$VERSION" NOTES="$NOTES" SIZE="$SIZE" SHA="$SHA" REPO="$REPO" DMGNAME=$(basename "$DMG") \
+/usr/bin/python3 - > build/latest.json <<'PY'
+import json, os
+v, repo = os.environ["VERSION"], os.environ["REPO"]
+print(json.dumps({
+    "version": v,
+    "notes": os.environ["NOTES"],
+    "dmg": f"https://github.com/{repo}/releases/download/v{v}/{os.environ['DMGNAME']}",
+    "size": int(os.environ["SIZE"]),
+    "sha256": os.environ["SHA"],
+    "page": f"https://github.com/{repo}/releases/tag/v{v}",
+}, ensure_ascii=False, indent=2))
+PY
 echo "built $DMG"
+echo "release: gh release create v$VERSION $DMG build/latest.json --notes-file <notes.md>"
