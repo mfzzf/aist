@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
     private var overlay: PanelController!
     private var mainWindow: MainWindowController!
+    private lazy var agent = AgentHub()
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
     private var subscriptions: Set<AnyCancellable> = []
@@ -45,6 +46,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let show = UserDefaults.standard.bool(forKey: showInDockKey)
         NSApp.setActivationPolicy(show ? .regular : .accessory)
         if show { NSApp.activate() }
+    }
+
+    /// Testing hooks: `-aistOpenPane chat` opens the main window at a pane; `-aistAsk "<question>"`
+    /// also sends a question there. Only act when passed explicitly on the command line.
+    private func openFromLaunchArguments() {
+        let args = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        guard let pane = args["aistOpenPane"] as? String else { return }
+        switch pane {
+        case "chat":
+            mainWindow.show(.chat)
+            if args["aistPickModel"] != nil { agent.session.pickingModel = true }
+            if let q = args["aistAsk"] as? String, !q.isEmpty {
+                agent.session.draft = q
+                agent.session.send()
+            }
+        case "todos": mainWindow.show(.todos)
+        default: break
+        }
+        // -aistSnapshot <path.png>: write the window to a file every 3 s (each shot to <path>-<n>.png).
+        if let path = args["aistSnapshot"] as? String {
+            Task { @MainActor [weak self] in
+                for n in 1...20 {
+                    try? await Task.sleep(for: .seconds(3))
+                    self?.mainWindow.snapshot(to: URL(fileURLWithPath: path.replacingOccurrences(of: ".png", with: "-\(n).png")))
+                }
+            }
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -73,10 +101,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recordEvent: { [weak self] event in Task { await self?.startMeeting(for: event) } }
         )
         let mailActions = MailActions(compose: { [weak self] draft in self?.composer.open(draft) })
-        mainWindow = MainWindowController(store: store, meetings: meetings) { [store, meetings, recorder, player, overlay, mail, calendar, github, wecom] model in
+        mainWindow = MainWindowController(store: store, meetings: meetings) { [store, meetings, recorder, player, overlay, mail, calendar, github, wecom, agent] model in
             AnyView(MainView(model: model, store: store, meetings: meetings, recorder: recorder,
                              player: player, overlay: overlay!.model, mail: mail, calendar: calendar, github: github, wecom: wecom,
-                             actions: actions, mailActions: mailActions))
+                             agent: agent, actions: actions, mailActions: mailActions))
         }
         mail.refreshInboxes()
         setUpCalendar()
@@ -87,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &subscriptions)
         _ = reminders
         _ = mailTodos
+        openFromLaunchArguments()
         // Names the AI should recognise as the user.
         mailAccounts.$accounts.combineLatest(github.$login)
             .receive(on: RunLoop.main)

@@ -24,6 +24,7 @@ enum SettingsWindow {
         pane("会议", "waveform", MeetingSettingsView())
         pane("连接", "link", ConnectionSettings(github: github, wecom: wecom))
         pane("AI", "sparkles", AISettings(), width: 700)
+        pane("问答", "text.bubble", AgentSettingsView())
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
         window.toolbarStyle = .preference

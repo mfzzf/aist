@@ -1,14 +1,15 @@
 import AistCore
 import Foundation
 
-// Usage: aist-cli extract <image> [--app <front app name>] [--me "名字,别名"]
+// Usage: aist-cli ask "<question>" [--search …] [--then "<follow-up>"]   (see Ask.swift)
+//        aist-cli extract <image> [--app <front app name>] [--me "名字,别名"]
 //        aist-cli email <file.txt> [--me ...]
 //        aist-cli meeting <transcript.txt> [--context <meeting-info.txt>]   (lines "我：…" / "对方：…")
 // Runs the same extraction the Mac app uses, without needing screen-recording permission.
 // For trying other providers: AIST_BASE_URL, AIST_MODEL, AIST_FORMAT (anthropic|openai), AIST_API_KEY.
 
 let args = CommandLine.arguments
-guard args.count >= 3, ["extract", "email", "chat", "meeting", "note", "assist"].contains(args[1]) else {
+guard args.count >= 3, ["extract", "email", "chat", "meeting", "note", "assist", "ask"].contains(args[1]) else {
     FileHandle.standardError.write(Data("usage: aist-cli extract <image> [--app <name>] | email|note <file>  [--me <names>]\n".utf8))
     exit(2)
 }
@@ -26,6 +27,10 @@ do {
                            format: LLMFormat(rawValue: env["AIST_FORMAT"] ?? "anthropic"))
     } else {
         config = try LLMConfig.load()
+    }
+    if args[1] == "ask" {
+        try await runAsk(args, config: config)
+        exit(0)
     }
     if args[1] == "meeting" {
         let lines = try String(contentsOfFile: args[2], encoding: .utf8).split(separator: "\n").map(String.init)

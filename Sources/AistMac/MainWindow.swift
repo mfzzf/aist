@@ -1,3 +1,4 @@
+import AistAgentUI
 import AistCore
 import AppKit
 import SwiftUI
@@ -7,8 +8,19 @@ import SwiftUI
 final class MainModel: ObservableObject {
     enum Pane: Hashable {
         case todos, calendar, meetings, done, github, wecom
+        /// 问答 with a new, empty conversation.
+        case chat
+        /// 问答 with a saved conversation.
+        case conversation(UUID)
         /// One mail account's folder.
         case mail(UUID, String)
+
+        var isChat: Bool {
+            switch self {
+            case .chat, .conversation: true
+            default: false
+            }
+        }
 
         var mailAccount: UUID? {
             if case let .mail(id, _) = self { return id }
@@ -111,6 +123,15 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         return window
     }
 
+    /// Testing hook: the window's contents as PNG (drawn from the view tree, so it works with the
+    /// screen locked and without screen-recording permission).
+    func snapshot(to url: URL) {
+        guard let view = window?.contentView?.superview ?? window?.contentView,
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
+    }
+
     func windowWillClose(_ notification: Notification) {
         // Back to a menu-bar-only app.
         DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
@@ -130,16 +151,22 @@ struct MainView: View {
     @ObservedObject var calendar: CalendarCenter
     @ObservedObject var github: GitHubCenter
     @ObservedObject var wecom: WeComCenter
+    @ObservedObject var agent: AgentHub
     let actions: MainActions
     let mailActions: MailActions
 
     @State private var adding = false
     @State private var newTitle = ""
 
-    var body: some View {
+    private var sidebar: some View {
+        Sidebar(model: model, store: store, meetings: meetings, recorder: recorder, mail: mail, calendar: calendar,
+                github: github, wecom: wecom, agent: agent)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 300)
+    }
+
+    private var threeColumns: some View {
         NavigationSplitView {
-            Sidebar(model: model, store: store, meetings: meetings, recorder: recorder, mail: mail, calendar: calendar, github: github, wecom: wecom)
-                .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 300)
+            sidebar
         } content: {
             Group {
                 switch model.pane {
@@ -156,6 +183,8 @@ struct MainView: View {
                 case let .mail(account, folder):
                     MailListColumn(model: model, mail: mail, account: account, folder: folder, actions: mailActions)
                         .id(model.pane)
+                case .chat, .conversation:
+                    EmptyView()
                 }
             }
             .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 440)
@@ -164,7 +193,50 @@ struct MainView: View {
             detail
                 .navigationSplitViewColumnWidth(min: 360, ideal: 480)
         }
-        .searchable(text: $model.query, placement: .toolbar, prompt: "搜索")
+    }
+
+    var body: some View {
+        Group {
+            if model.pane.isChat {
+                // Conversations live in the sidebar, so the chat takes the rest of the window.
+                NavigationSplitView {
+                    sidebar
+                } detail: {
+                    ChatPane(session: agent.session, library: agent.library)
+                        .navigationSplitViewColumnWidth(min: 420, ideal: 760)
+                        .toolbar { toolbar }
+                }
+            } else {
+                threeColumns
+            }
+        }
+        .searchable(text: $model.query, placement: .toolbar, prompt: model.pane.isChat ? "搜索对话" : "搜索")
+        .onChange(of: model.query) { _, q in
+            if model.pane.isChat { agent.library.query = q }
+        }
+        .onChange(of: model.pane) { old, pane in
+            if !pane.isChat, !agent.library.query.isEmpty { agent.library.query = "" }
+            if case let .conversation(id) = pane { agent.library.selection.selected = id }
+            else { agent.library.selection.selected = nil }
+            switch pane {
+            case let .conversation(id):
+                agent.session.open(id)
+            case .chat:
+                // 问答 itself = a new conversation (unless one is still being answered).
+                if agent.session.conversationID != nil, !agent.session.isRunning { agent.session.reset() }
+            default: break
+            }
+            if pane.isChat, !old.isChat {
+                agent.refreshModels()
+                agent.session.prefetch(agent.library.conversations.prefix(20).map(\.id))
+            }
+        }
+        // A new conversation gets its id with the first answer: select it in the sidebar.
+        .onChange(of: agent.session.conversationID) { _, id in
+            guard model.pane.isChat else { return }
+            let pane: MainModel.Pane = id.map { .conversation($0) } ?? .chat
+            if model.pane != pane { model.pane = pane }
+        }
         .navigationTitle(title)
         .alert("新建待办", isPresented: $adding) {
             TextField("要做的事", text: $newTitle)
@@ -192,7 +264,18 @@ struct MainView: View {
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        if model.pane == .calendar || model.pane == .wecom {
+        if model.pane.isChat {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    agent.session.reset()
+                    model.pane = .chat
+                } label: {
+                    Label("新对话", systemImage: "square.and.pencil")
+                }
+                .help("新对话")
+                .keyboardShortcut("n")
+            }
+        } else if model.pane == .calendar || model.pane == .wecom {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     calendar.reload()
@@ -271,6 +354,8 @@ struct MainView: View {
         case .wecom: "企业微信"
         case .meetings: "会议"
         case .done: "已完成"
+        case .chat: "新对话"
+        case .conversation: "问答"
         case let .mail(account, folder):
             mail.folders(of: account).first { $0.name == folder }?.title ?? folder
         }
@@ -316,6 +401,47 @@ struct MainView: View {
     }
 }
 
+// MARK: - 问答
+
+/// The chat, titled with the conversation's name (observed here so streaming doesn't redraw the window).
+private struct ChatPane: View {
+    @ObservedObject var session: AgentSession
+    @ObservedObject var library: AgentLibrary
+
+    var body: some View {
+        AgentChatView(session: session, style: .full,
+                      suggestions: ["今天有什么科技新闻？", "帮我比较一下 SwiftData 和 Core Data", "解释一下什么是 RAG"])
+            .navigationTitle(title)
+    }
+
+    private var title: String {
+        guard let id = session.conversationID else { return "新对话" }
+        return session.title ?? library.conversations.first { $0.id == id }?.title ?? "问答"
+    }
+}
+
+/// Saved conversations at the bottom of the sidebar.
+private struct ChatSidebarSection: View {
+    @ObservedObject var model: MainModel
+    @ObservedObject var library: AgentLibrary
+    let session: AgentSession
+
+    var body: some View {
+        if !library.conversations.isEmpty {
+            Section(library.query.isEmpty ? "对话" : "对话 · 搜索结果") {
+                ConversationRows(library: library) { id in
+                    model.pane = .conversation(id)
+                } onDelete: { id in
+                    if model.pane == .conversation(id) {
+                        session.reset()
+                        model.pane = .chat
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Sidebar
 
 private struct Sidebar: View {
@@ -327,6 +453,7 @@ private struct Sidebar: View {
     @ObservedObject var calendar: CalendarCenter
     @ObservedObject var github: GitHubCenter
     @ObservedObject var wecom: WeComCenter
+    @ObservedObject var agent: AgentHub
 
     var body: some View {
         List(selection: Binding(
@@ -349,6 +476,9 @@ private struct Sidebar: View {
             Label("已完成", systemImage: "checkmark.circle")
                 .badge(store.doneItems.count)
                 .tag(MainModel.Pane.done)
+            Label("问答", systemImage: "text.bubble")
+                .tag(MainModel.Pane.chat)
+                .help("新对话")
 
             if let id = recorder.meetingID, let start = recorder.startedAt {
                 Section("正在录音") {
@@ -373,6 +503,8 @@ private struct Sidebar: View {
 
             MailSidebarSection(model: model, mail: mail)
             ConnectionsSidebarSection(model: model, github: github, wecom: wecom)
+
+            ChatSidebarSection(model: model, library: agent.library, session: agent.session)
         }
         .listStyle(.sidebar)
         // Outside the List so its edges can match the rows' selection highlight exactly.
