@@ -4,7 +4,7 @@ import Foundation
 import UserNotifications
 
 /// Reads new inbox mail and files any to-dos it finds — the automatic version of 「分析待办」.
-/// Only mail that arrives after it's switched on is read; each message once.
+/// Only mail that arrives after it's switched on (and after its account was added) is read; each message once.
 @MainActor
 final class MailAutoTodo: ObservableObject {
     @Published var enabled: Bool {
@@ -54,11 +54,14 @@ final class MailAutoTodo: ObservableObject {
 
     private func scan() {
         guard enabled else { return }
-        let cutoff = Date.now.addingTimeInterval(-3 * 86400)
+        let recent = Date.now.addingTimeInterval(-3 * 86400)
         for (account, headers) in inboxes {
+            // A new account's first load brings its whole inbox: what was there before it was added
+            // counts as read, like switching this on. Only mail that arrives afterwards is analysed.
+            let added = mail.accounts.account(account)?.addedAt ?? .distantPast
+            let cutoff = max(recent, added)
             for h in headers where !processed.contains(key(account, h)) {
                 processed.insert(key(account, h))
-                // A new account's first load brings old mail too; only recent mail is worth reading.
                 if h.date > cutoff { queue.append((account, h)) }
             }
         }
