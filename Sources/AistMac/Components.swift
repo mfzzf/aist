@@ -95,18 +95,6 @@ enum DueFormatter {
         return now.timeIntervalSince(date) < 7 * 86400 ? "本周" : "更早"
     }
 
-    /// Where an open to-do falls by deadline.
-    static func dueBucket(_ item: TodoItem, now: Date = .now) -> String {
-        if item.pinned == true { return "置顶" }
-        guard let due = item.dueAt else { return "无期限" }
-        let cal = Calendar.current
-        if due < now { return "已过期" }
-        if cal.isDateInToday(due) { return "今天" }
-        if cal.isDateInTomorrow(due) { return "明天" }
-        return due.timeIntervalSince(now) < 7 * 86400 ? "本周" : "以后"
-    }
-
-    static let dueBucketOrder = ["置顶", "已过期", "今天", "明天", "本周", "以后", "无期限"]
     static let pastBucketOrder = ["今天", "昨天", "本周", "更早"]
 }
 
@@ -214,5 +202,13 @@ extension View {
         } else {
             background(.regularMaterial, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
         }
+    }
+}
+
+extension MeetingStore {
+    /// Titles and dates, for gathering to-dos under the meeting they came from.
+    var groupingInfo: [UUID: TodoGrouping.MeetingInfo] {
+        Dictionary(meetings.map { ($0.id, TodoGrouping.MeetingInfo(title: $0.title, startedAt: $0.startedAt)) },
+                   uniquingKeysWith: { a, _ in a })
     }
 }

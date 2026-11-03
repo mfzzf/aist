@@ -140,7 +140,7 @@ struct MainView: View {
             Group {
                 switch model.pane {
                 case .todos, .done:
-                    TodoListColumn(model: model, store: store)
+                    TodoListColumn(model: model, store: store, meetings: meetings)
                 case .calendar:
                     CalendarListColumn(model: model, calendar: calendar, meetings: meetings)
                 case .wecom:
@@ -406,6 +406,7 @@ private struct CircleCheck: View {
 private struct TodoListColumn: View {
     @ObservedObject var model: MainModel
     @ObservedObject var store: TodoStore
+    @ObservedObject var meetings: MeetingStore
     @State private var flipping: Set<UUID> = []
 
     private var isDone: Bool { model.pane == .done }
@@ -421,25 +422,30 @@ private struct TodoListColumn: View {
         }
     }
 
-    private var groups: [(String, [TodoItem])] {
-        let order = isDone ? DueFormatter.pastBucketOrder : DueFormatter.dueBucketOrder
-        let grouped = Dictionary(grouping: filtered) { item in
-            isDone ? DueFormatter.bucket(item.completedAt ?? item.updatedAt) : DueFormatter.dueBucket(item)
+    /// Open: by deadline, then undated ones under their meeting. Done: by when they were finished.
+    private var groups: [TodoGroup] {
+        if isDone {
+            let grouped = Dictionary(grouping: filtered) { DueFormatter.bucket($0.completedAt ?? $0.updatedAt) }
+            return DueFormatter.pastBucketOrder.compactMap { key in
+                grouped[key].map { TodoGroup(kind: .undated, title: key, items: $0) }
+            }
         }
-        return order.compactMap { key in grouped[key].map { (key, $0) } }
+        return TodoGrouping.groups(filtered, meetings: meetings.groupingInfo)
     }
 
     var body: some View {
         List(selection: $model.selection) {
-            ForEach(groups, id: \.0) { title, items in
-                Section(title) {
-                    ForEach(items) { item in
+            ForEach(groups, id: \.key) { group in
+                Section {
+                    ForEach(group.items) { item in
                         TodoListRow(item: item, checked: (item.status == .done) != flipping.contains(item.id)) {
                             flip(item)
                         }
                         .tag(item.id)
                         .contextMenu { menu(item) }
                     }
+                } header: {
+                    header(group)
                 }
             }
         }
@@ -457,6 +463,29 @@ private struct TodoListColumn: View {
                                            description: Text("按 \(HotkeyManager.shared.current.display) 截屏分析，或按 ⌘N 新建"))
                 }
             }
+        }
+    }
+
+    /// A meeting's heading names it and opens it.
+    @ViewBuilder private func header(_ group: TodoGroup) -> some View {
+        if let id = group.meetingID {
+            Button {
+                model.query = ""
+                model.pane = .meetings
+                model.selection = id
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "waveform")
+                    Text(group.title).lineLimit(1)
+                    if let date = group.date {
+                        Text(DueFormatter.stamp(date)).fontWeight(.regular).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .help("查看这场会议")
+        } else {
+            Text(group.title)
         }
     }
 

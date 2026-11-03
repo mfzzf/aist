@@ -90,6 +90,7 @@ struct TodoPanelView: View {
         .opacity(open ? 1 : 0)
         .animation(open ? OverlayModel.openSpring : OverlayModel.closeCurve, value: open)
         .animation(OverlayModel.spring, value: items.map(\.id))
+        .animation(OverlayModel.spring, value: groups.map(\.id))
         .animation(OverlayModel.spring, value: processing.map(\.id))
         .animation(OverlayModel.spring, value: model.note)
         .animation(OverlayModel.spring, value: recorder.isRecording)
@@ -134,25 +135,40 @@ struct TodoPanelView: View {
 
     // MARK: List
 
+    private var groups: [TodoGroup] { TodoGrouping.groups(items, meetings: meetings.groupingInfo) }
+
     private var list: some View {
-        ScrollView {
+        let groups = groups
+        // Headings only earn their space once there's more than one group.
+        let headed = groups.count > 1
+        let info = meetings.groupingInfo
+        return ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if items.isEmpty {
                     emptyState.staggered(open, index: 1)
                 }
-                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                    PanelRow(
-                        item: item,
-                        checked: flipping.contains(item.id),
-                        fresh: model.freshIDs.contains(item.id),
-                        onCheck: { complete(item) },
-                        onOpen: { actions.openMain(.todos, item.id) }
-                    )
-                    .staggered(open, index: index + 1)
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)),
-                        removal: .opacity.combined(with: .scale(scale: 0.97, anchor: .leading))
-                    ))
+                ForEach(Array(groups.enumerated()), id: \.element.id) { g, group in
+                    let base = groups.prefix(g).reduce(0) { $0 + $1.items.count + (headed ? 1 : 0) }
+                    if headed {
+                        PanelGroupHeader(group: group, first: g == 0) { id in actions.openMain(.meetings, id) }
+                            .staggered(open, index: base + 1)
+                            .transition(.opacity)
+                    }
+                    ForEach(Array(group.items.enumerated()), id: \.element.id) { index, item in
+                        PanelRow(
+                            item: item,
+                            meetingTitle: group.isMeeting ? nil : item.meetingID.flatMap { info[$0]?.title },
+                            checked: flipping.contains(item.id),
+                            fresh: model.freshIDs.contains(item.id),
+                            onCheck: { complete(item) },
+                            onOpen: { actions.openMain(.todos, item.id) }
+                        )
+                        .staggered(open, index: base + index + (headed ? 2 : 1))
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .top)),
+                            removal: .opacity.combined(with: .scale(scale: 0.97, anchor: .leading))
+                        ))
+                    }
                 }
             }
             .padding(.bottom, 6)
@@ -214,8 +230,56 @@ struct TodoPanelView: View {
 
 // MARK: - Row
 
+/// A quiet heading over a group; a meeting's opens that meeting.
+private struct PanelGroupHeader: View {
+    let group: TodoGroup
+    let first: Bool
+    let onOpenMeeting: (UUID) -> Void
+    @State private var hovered = false
+
+    private var meetingID: UUID? { group.meetingID }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if meetingID != nil {
+                Image(systemName: "waveform").font(.system(size: 9.5, weight: .semibold))
+            }
+            Text(group.title).lineLimit(1)
+            if let date = group.date {
+                Text(DueFormatter.stamp(date))
+                    .fontWeight(.regular)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            Spacer(minLength: 4)
+            if meetingID != nil {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .opacity(hovered ? 1 : 0)
+            }
+            Text("\(group.items.count)")
+                .fontWeight(.regular)
+                .monospacedDigit()
+                .foregroundStyle(.tertiary)
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(group.kind == .overdue ? AnyShapeStyle(Style.overdue) : AnyShapeStyle(.secondary))
+        .padding(.horizontal, 16)
+        .padding(.top, first ? 2 : 10)
+        .padding(.bottom, 2)
+        .contentShape(Rectangle())
+        .onTapGesture { if let meetingID { onOpenMeeting(meetingID) } }
+        .onHover { h in if meetingID != nil { withAnimation(.easeOut(duration: 0.12)) { hovered = h } } }
+        .help(meetingID != nil ? "查看这场会议" : "")
+    }
+}
+
 private struct PanelRow: View {
     let item: TodoItem
+    /// The meeting it came from, when the group heading doesn't already say so.
+    let meetingTitle: String?
     let checked: Bool
     let fresh: Bool
     let onCheck: () -> Void
@@ -274,12 +338,24 @@ private struct PanelRow: View {
             if let who = item.requester, !who.isEmpty {
                 Text(who).lineLimit(1)
             }
-            if item.meetingID != nil {
-                Image(systemName: "waveform").font(.system(size: 9))
+            if let meetingTitle {
+                Label(meetingTitle, systemImage: "waveform")
+                    .labelStyle(TightLabel())
+                    .lineLimit(1)
             }
         }
         .font(.system(size: 11))
         .foregroundStyle(.secondary)
+    }
+}
+
+/// Icon and text closer together than the stock label.
+private struct TightLabel: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 3) {
+            configuration.icon.font(.system(size: 9))
+            configuration.title
+        }
     }
 }
 

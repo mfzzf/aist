@@ -132,6 +132,7 @@ struct OutgoingMail: Sendable {
     var body: String
     var inReplyTo: String?
     var references: [String]
+    var attachments: [MailAttachment] = []
 }
 
 enum MailError: LocalizedError {
@@ -354,7 +355,10 @@ actor MailSession {
             recipients: mail.to.map { EmailAddress(address: $0) },
             ccRecipients: mail.cc.map { EmailAddress(address: $0) },
             subject: mail.subject,
-            textBody: mail.body
+            textBody: mail.body,
+            attachments: mail.attachments.isEmpty ? nil : mail.attachments.map {
+                Attachment(filename: $0.filename, mimeType: $0.contentType, data: $0.data)
+            }
         )
         var headers: [String: String] = [:]
         if let reply = mail.inReplyTo { headers["In-Reply-To"] = reply }
@@ -390,15 +394,19 @@ actor MailSession {
         func recipients(_ list: [String]) -> [[String: Any]] {
             list.map { ["emailAddress": ["address": $0]] }
         }
-        let payload: [String: Any] = [
-            "message": [
-                "subject": mail.subject,
-                "body": ["contentType": "Text", "content": mail.body],
-                "toRecipients": recipients(mail.to),
-                "ccRecipients": recipients(mail.cc),
-            ],
-            "saveToSentItems": true,
+        var message: [String: Any] = [
+            "subject": mail.subject,
+            "body": ["contentType": "Text", "content": mail.body],
+            "toRecipients": recipients(mail.to),
+            "ccRecipients": recipients(mail.cc),
         ]
+        if !mail.attachments.isEmpty {
+            message["attachments"] = mail.attachments.map { a -> [String: Any] in
+                ["@odata.type": "#microsoft.graph.fileAttachment", "name": a.filename,
+                 "contentType": a.contentType, "contentBytes": a.data.base64EncodedString()]
+            }
+        }
+        let payload: [String: Any] = ["message": message, "saveToSentItems": true]
         var request = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me/sendMail")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
