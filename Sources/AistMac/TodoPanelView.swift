@@ -7,6 +7,8 @@ struct PanelActions {
     var capture: () -> Void
     var startMeeting: () -> Void
     var stopMeeting: () -> Void
+    /// Bring up the "会议实况" window.
+    var showLive: () -> Void
     /// Open the main window, optionally at one to-do or meeting.
     var openMain: (MainModel.Pane?, UUID?) -> Void
     /// Record a calendar meeting (named after the event).
@@ -51,7 +53,7 @@ struct TodoPanelView: View {
         VStack(spacing: 0) {
             header
             if recorder.isRecording, let start = recorder.startedAt {
-                RecordingBar(startedAt: start, onStop: actions.stopMeeting)
+                RecordingBar(startedAt: start, live: recorder.live, onShowLive: actions.showLive, onStop: actions.stopMeeting)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
             ForEach(processing) { m in
@@ -364,18 +366,41 @@ private struct TightLabel: LabelStyle {
 /// Across the top of the panel while a meeting is being recorded.
 private struct RecordingBar: View {
     let startedAt: Date
+    @ObservedObject var live: LiveTranscript
+    let onShowLive: () -> Void
     let onStop: () -> Void
+
+    /// The last thing said, as a one-line subtitle.
+    private var lastLine: String? {
+        if let d = live.drafts[.others] ?? live.drafts[.me], !d.isEmpty { return d }
+        guard let l = live.shownLines.last else { return nil }
+        return l.translation ?? l.text
+    }
 
     var body: some View {
         HStack(spacing: 8) {
             PulsingDot()
-            Text("会议录音中")
-                .font(.system(size: 12, weight: .medium))
-            TimelineView(.periodic(from: startedAt, by: 1)) { ctx in
-                Text(DueFormatter.duration(ctx.date.timeIntervalSince(startedAt)))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text("会议录音中")
+                        .font(.system(size: 12, weight: .medium))
+                    TimelineView(.periodic(from: startedAt, by: 1)) { ctx in
+                        Text(DueFormatter.duration(ctx.date.timeIntervalSince(startedAt)))
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                    }
+                }
+                if let lastLine {
+                    Text(lastLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
             }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onShowLive)
+            .help("打开会议实况：实时转写和速记")
             Spacer()
             Button(action: onStop) {
                 Text("结束")
@@ -389,7 +414,7 @@ private struct RecordingBar: View {
             .help("结束录音，生成会议纪要")
         }
         .padding(.horizontal, 11)
-        .frame(height: 38)
+        .frame(minHeight: 38)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Style.overdue.opacity(0.07)))
         .padding(.horizontal, 12)
         .padding(.bottom, 6)

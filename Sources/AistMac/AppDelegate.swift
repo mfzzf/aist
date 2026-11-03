@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var cloud = CloudSync(store: store)
     private var cloudTimer: Timer?
     private let recorder = AudioRecorder()
+    private lazy var liveWindow = LiveMeetingWindow(recorder: recorder)
+    private let calls = CallWatcher()
     private let player = AudioPlayback()
     private let mailAccounts = MailAccountStore()
     private lazy var mail = MailCenter(accounts: mailAccounts)
@@ -46,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        MeetingSettings.registerDefaults()
         Self.applyDockPolicy()
         // The GUI session can reach the login keychain; move the plaintext key there.
         LLMConfig.migrateKeyToKeychain()
@@ -56,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlay.onCapture = { [weak self] in self?.captureAndAnalyze() }
         overlay.onStartMeeting = { [weak self] in Task { await self?.startMeeting() } }
         overlay.onStopMeeting = { [weak self] in Task { await self?.stopMeeting() } }
+        overlay.onShowLive = { [weak self] in self?.liveWindow.show() }
         overlay.onOpenMain = { [weak self] pane, id in self?.mainWindow.show(pane, select: id) }
         overlay.onRecordEvent = { [weak self] event in Task { await self?.startMeeting(for: event) } }
 
@@ -64,6 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             startMeeting: { [weak self] in Task { await self?.startMeeting() } },
             stopMeeting: { [weak self] in Task { await self?.stopMeeting() } },
             retryMeeting: { [weak self] id in Task { await self?.process(id) } },
+            emailMinutes: { [weak self] id in self?.emailMinutes(id) },
+            showLive: { [weak self] in self?.liveWindow.show() },
             recordEvent: { [weak self] event in Task { await self?.startMeeting(for: event) } }
         )
         let mailActions = MailActions(compose: { [weak self] draft in self?.composer.open(draft) })
@@ -74,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         mail.refreshInboxes()
         setUpCalendar()
+        setUpLiveMeeting()
         // "连接 GitHub…" from Settings: the sheet lives on the main window.
         github.$connecting.merge(with: wecom.$connecting).filter { $0 }
             .sink { [weak self] _ in self?.mainWindow.show() }
@@ -188,25 +195,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let meeting = meetings.create()
-        if let event {
+        if let event, event.isCall {
+            // A call noticed in a meeting app: named after the app until the minutes find a title.
+            meetings.update(meeting.id) { $0.title = event.title }
+        } else if let event {
             meetings.update(meeting.id) {
                 $0.title = event.title
                 $0.titleEdited = true
                 $0.calendarEventID = event.id
                 $0.attendees = event.attendees.isEmpty ? nil : event.attendees
+                $0.attendeeEmails = event.attendeeEmails.isEmpty ? nil : event.attendeeEmails
             }
         }
         overlay.model.meetingPrompt = nil
         do {
-            try await recorder.start(for: meeting.id)
+            try await recorder.start(for: meeting.id, language: MeetingSettings.language,
+                                     translateTo: MeetingSettings.translateTo)
+            recorder.session.begin()
+            if MeetingSettings.showLiveWindow, LiveTranscript.isSupported { liveWindow.show() }
         } catch {
             meetings.delete(meeting.id)
             overlay.show(message: "录音没能开始：\(error.localizedDescription)", isError: true, for: 6)
         }
     }
 
-    private func stopMeeting() async {
-        guard let (id, recording) = await recorder.stop() else { return }
+    /// `discardIfSilent`: ended because nobody spoke; with nothing heard there's nothing to keep.
+    private func stopMeeting(discardIfSilent: Bool = false) async {
+        recorder.session.end()
+        liveWindow.hide()
+        guard let (id, recording, live) = await recorder.stop() else { return }
+        if discardIfSilent, let live, live.isEmpty {
+            try? FileManager.default.removeItem(at: TodoStore.folder(for: recording.id))
+            meetings.delete(id)
+            overlay.show(message: "没有人说话，已停止会议录音", isError: false)
+            return
+        }
         guard recording.hasMicrophone || recording.hasSystemAudio else {
             try? FileManager.default.removeItem(at: TodoStore.folder(for: recording.id))
             meetings.update(id) {
@@ -221,6 +244,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             $0.recording = recording
             $0.duration = recording.duration
             $0.status = .transcribing
+            // Transcribed live: the minutes can start right away. Nothing heard live → try the files.
+            if let live, !live.isEmpty { $0.transcript = live }
         }
         linkCalendarEvent(id)
         await process(id)
@@ -343,6 +368,125 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         meetings.update(id) {
             $0.calendarEventID = event.id
             if $0.attendees == nil, !event.attendees.isEmpty { $0.attendees = event.attendees }
+            if $0.attendeeEmails == nil, !event.attendeeEmails.isEmpty { $0.attendeeEmails = event.attendeeEmails }
+        }
+    }
+
+    /// Opens a mail with the minutes and both sides' to-dos, addressed to the attendees.
+    private func emailMinutes(_ id: UUID) {
+        guard let m = meetings.meeting(id) else { return }
+        guard let account = mailAccounts.accounts.first else {
+            overlay.show(message: "先在「邮件」里添加一个邮箱账户，才能发送纪要", isError: true, for: 6)
+            return
+        }
+        let mine = Set(mailAccounts.accounts.map { $0.email.lowercased() })
+        let todos = (m.todoIDs ?? []).compactMap { tid in store.items.first { $0.id == tid } }.map {
+            MeetingExport.Todo(title: $0.title, due: DueFormatter.string($0.dueAt) ?? $0.dueText, done: $0.status == .done)
+        }
+        var draft = ComposeDraft.new(from: account.id)
+        draft.to = (m.attendeeEmails ?? []).filter { !mine.contains($0.lowercased()) }.joined(separator: ", ")
+        draft.subject = "会议纪要：\(m.title)"
+        let me = account.senderName ?? UserIdentity.names.first ?? "我"
+        draft.body = MeetingExport.mailBody(m, myTodos: todos, myName: me)
+        composer.open(draft)
+    }
+
+    // MARK: Live meeting: notes while recording, ending it, noticing calls
+
+    private func setUpLiveMeeting() {
+        let session = recorder.session
+        session.makeWriter = {
+            guard let config = try? LLMConfig.load() else { return nil }
+            return LiveNotesWriter(client: LLMClient(config: config), identity: UserIdentity.names)
+        }
+        session.calendarContext = { [weak self] in
+            guard let self, let id = self.recorder.meetingID, let m = self.meetings.meeting(id) else { return nil }
+            return self.calendarContext(for: m)
+        }
+        session.onEnd = { [weak self] reason in
+            guard let self else { return }
+            switch reason {
+            case let .appLeft(name):
+                self.overlay.show(message: "\(name.isEmpty ? "会议软件" : name)已挂断，正在生成纪要", isError: false)
+                Task { await self.stopMeeting() }
+            case .silence:
+                self.overlay.show(message: "长时间没人说话，已结束录音并生成纪要", isError: false)
+                Task { await self.stopMeeting() }
+            case .nobodySpoke:
+                Task { await self.stopMeeting(discardIfSilent: true) }
+            }
+        }
+        liveWindow.onStop = { [weak self] in Task { await self?.stopMeeting() } }
+        liveWindow.onOpenMeeting = { [weak self] in
+            guard let self, let id = self.recorder.meetingID else { return }
+            self.mainWindow.show(.meetings, select: id)
+        }
+        calls.onPoll = { [weak self] calls in
+            guard let self, self.recorder.isRecording else { return }
+            self.recorder.session.tick(calls: calls)
+        }
+        calls.onCallStarted = { [weak self] bundleID, name in
+            guard let self, MeetingSettings.promptOnCall, !self.recorder.isRecording, self.overlay.model.meetingPrompt == nil else { return }
+            // The calendar meeting going on now, if there is one; else the call itself.
+            let now = Date.now
+            let event = self.calendar.events.first { e in
+                !e.isAllDay && e.isMeeting && e.start.addingTimeInterval(-10 * 60) <= now && now < e.end
+            } ?? CalEvent.call(app: name, bundleID: bundleID)
+            self.overlay.model.meetingPrompt = event
+            NSSound(named: "Glass")?.play()
+            self.overlay.open(autoClose: 20)
+        }
+        calls.start()
+        installDebugCommands()
+    }
+
+    /// Lets a test script drive meetings on a dev Mac (`defaults write com.jianfengmei.aist debug.commands -bool YES`):
+    /// `notifyutil`-style distributed notifications "aist.debug.start" / "aist.debug.stop" / "aist.debug.dump".
+    private func installDebugCommands() {
+        guard UserDefaults.standard.bool(forKey: "debug.commands") else { return }
+        let center = DistributedNotificationCenter.default()
+        center.addObserver(forName: .init("aist.debug.start"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { Task { await self?.startMeeting() } }
+        }
+        center.addObserver(forName: .init("aist.debug.stop"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { Task { await self?.stopMeeting() } }
+        }
+        // Removes test meetings (ids in the notification's object, comma-separated) and their to-dos,
+        // through the stores so iCloud and Reminders see the deletions.
+        center.addObserver(forName: .init("aist.debug.cleanup"), object: nil, queue: .main) { [weak self] note in
+            let ids = ((note.object as? String) ?? "").split(separator: ",").compactMap { UUID(uuidString: String($0)) }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                for id in ids {
+                    if let m = self.meetings.meeting(id) { self.store.delete(m.todoIDs ?? []) }
+                    self.meetings.delete(id)
+                }
+                self.cloud.sync()
+            }
+        }
+        center.addObserver(forName: .init("aist.debug.retry"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let m = self.meetings.sorted.first else { return }
+                Task { await self.process(m.id) }
+            }
+        }
+        center.addObserver(forName: .init("aist.debug.dump"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let live = self.recorder.live
+                var out = "status=\(live.status ?? "-") langs=\(live.languages) running=\(live.isRunning)\n"
+                out += "drafts=\(live.drafts)\n"
+                for l in live.shownLines {
+                    out += "[\(MeetingTime.stamp(l.start))] \(l.speaker.rawValue): \(l.text)" + (l.translation.map { " | \($0)" } ?? "") + "\n"
+                }
+                out += "notes=\(self.recorder.session.notesState) \(self.recorder.session.notes)\n"
+                out += "ending=\(String(describing: self.recorder.session.ending)) calls=\(CallWatcher.currentCalls()) readers=\(CallWatcher.readers())\n"
+                if let m = self.meetings.sorted.first {
+                    out += "latest meeting: \(m.title) status=\(m.status) error=\(m.error ?? "-") lines=\(m.transcript?.count ?? -1)\n"
+                    out += "summary=\(String(describing: m.summary))\n"
+                }
+                try? out.write(toFile: "/tmp/aist-debug.txt", atomically: true, encoding: .utf8)
+            }
         }
     }
 

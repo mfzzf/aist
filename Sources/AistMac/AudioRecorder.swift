@@ -10,6 +10,16 @@ import ScreenCaptureKit
 final class AudioRecorder: ObservableObject {
     @Published private(set) var meetingID: UUID?
     @Published private(set) var startedAt: Date?
+    /// Transcribed while recording (macOS 26+).
+    let live: LiveTranscript
+    /// Notes and the end-of-meeting watch while recording.
+    let session: LiveMeeting
+
+    init() {
+        let live = LiveTranscript()
+        self.live = live
+        session = LiveMeeting(live: live)
+    }
 
     private var stream: SCStream?
     private var sink: CaptureSink?
@@ -22,7 +32,7 @@ final class AudioRecorder: ObservableObject {
         var errorDescription: String? { "找不到可录制的显示器" }
     }
 
-    func start(for meeting: UUID) async throws {
+    func start(for meeting: UUID, language: String = "zh-CN", translateTo: Locale.Language? = nil) async throws {
         guard meetingID == nil else { return }
         let micAllowed = await AVCaptureDevice.requestAccess(for: .audio)
 
@@ -44,7 +54,7 @@ final class AudioRecorder: ObservableObject {
         let id = UUID()
         let folder = TodoStore.folder(for: id)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let sink = CaptureSink(folder: folder)
+        let sink = CaptureSink(folder: folder, live: live)
         let stream = SCStream(filter: filter, configuration: config, delegate: sink)
         try stream.addStreamOutput(sink, type: .screen, sampleHandlerQueue: sink.queue)
         try stream.addStreamOutput(sink, type: .audio, sampleHandlerQueue: sink.queue)
@@ -52,6 +62,7 @@ final class AudioRecorder: ObservableObject {
             try stream.addStreamOutput(sink, type: .microphone, sampleHandlerQueue: sink.queue)
         }
         try await stream.startCapture()
+        live.start(language: language, translateTo: translateTo)
 
         self.stream = stream
         self.sink = sink
@@ -60,11 +71,13 @@ final class AudioRecorder: ObservableObject {
         meetingID = meeting
     }
 
-    /// Stops and returns the finished recording (files already closed), or nil if nothing was recording.
-    func stop() async -> (meeting: UUID, recording: TodoRecording)? {
+    /// Stops and returns the finished recording (files already closed) with the live transcript
+    /// (nil when it didn't work), or nil if nothing was recording.
+    func stop() async -> (meeting: UUID, recording: TodoRecording, transcript: [TranscriptSegment]?)? {
         guard let stream, let sink, let meetingID, let startedAt, let recordingID else { return nil }
         try? await stream.stopCapture()
         let result = await sink.finish()
+        let transcript = await live.finish()
         self.stream = nil
         self.sink = nil
         self.meetingID = nil
@@ -77,7 +90,7 @@ final class AudioRecorder: ObservableObject {
             id: recordingID, startedAt: startedAt, duration: Date.now.timeIntervalSince(startedAt),
             hasSystemAudio: result.system.ok, hasMicrophone: result.mic.ok, micOffset: offset
         )
-        return (meetingID, recording)
+        return (meetingID, recording, transcript)
     }
 }
 
@@ -86,19 +99,46 @@ final class CaptureSink: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked 
     let queue = DispatchQueue(label: "aist.recorder")
     private let system: AudioFileWriter
     private let mic: AudioFileWriter
+    private let live: LiveTranscript
+    /// First sample time of the whole recording and of each side, on the capture clock: the
+    /// transcript's 0 is whichever side started first (same as the files' alignment).
+    private var firstTime: Double?
+    private var leads: [TranscriptSegment.Speaker: Double] = [:]
 
-    init(folder: URL) {
+    init(folder: URL, live: LiveTranscript) {
         system = AudioFileWriter(url: folder.appendingPathComponent("system.m4a"))
         mic = AudioFileWriter(url: folder.appendingPathComponent("mic.m4a"))
+        self.live = live
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer buffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard buffer.isValid else { return }
+        let speaker: TranscriptSegment.Speaker
         switch type {
-        case .audio: system.append(buffer)
-        case .microphone: mic.append(buffer)
-        default: break // the token video frames
+        case .audio:
+            system.append(buffer)
+            speaker = .others
+        case .microphone:
+            mic.append(buffer)
+            speaker = .me
+        default: return // the token video frames
         }
+        let t = CMTimeGetSeconds(buffer.presentationTimeStamp)
+        if firstTime == nil { firstTime = t }
+        if leads[speaker] == nil { leads[speaker] = t - (firstTime ?? t) }
+        if let pcm = Self.pcm(buffer) { live.push(pcm, speaker: speaker, lead: leads[speaker] ?? 0) }
+    }
+
+    /// The sample buffer's audio as an AVAudioPCMBuffer (copied: the capture buffer is reused).
+    private static func pcm(_ buffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
+        guard let desc = buffer.formatDescription else { return nil }
+        let format = AVAudioFormat(cmAudioFormatDescription: desc)
+        let frames = AVAudioFrameCount(buffer.numSamples)
+        guard frames > 0, let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
+        pcm.frameLength = frames
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(buffer, at: 0, frameCount: Int32(frames),
+                                                                  into: pcm.mutableAudioBufferList)
+        return status == noErr ? pcm : nil
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

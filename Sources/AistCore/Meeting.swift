@@ -23,6 +23,8 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     public var calendarEventID: String?
     /// Who was invited, from the calendar event; helps the minutes name people.
     public var attendees: [String]?
+    /// Their email addresses, where the calendar has them: who gets the minutes by mail.
+    public var attendeeEmails: [String]?
 
     public init(id: UUID = UUID(), startedAt: Date = .now) {
         self.id = id
@@ -45,12 +47,15 @@ public struct TranscriptSegment: Codable, Hashable, Sendable {
     public var start: Double
     public var end: Double
     public var text: String
+    /// The line in the subtitle language, when live translation was on.
+    public var translation: String?
 
-    public init(speaker: Speaker, start: Double, end: Double, text: String) {
+    public init(speaker: Speaker, start: Double, end: Double, text: String, translation: String? = nil) {
         self.speaker = speaker
         self.start = start
         self.end = end
         self.text = text
+        self.translation = translation
     }
 }
 
@@ -63,9 +68,16 @@ public struct MeetingSummary: Codable, Hashable, Sendable {
     public var openQuestions: [String]
     /// Who spoke and about what, inferred from the attendee list (the transcript only knows 我/对方).
     public var speakers: [MeetingSpeaker]?
+    /// Names and terms as the minutes spell them, with how speech recognition misheard them.
+    public var terms: [MeetingTerm]?
+    /// Where each key point / decision was said ("mm:ss" of its evidence line), parallel to the lists.
+    public var keyPointAt: [String?]?
+    public var decisionAt: [String?]?
 
     enum CodingKeys: String, CodingKey {
-        case speakers
+        case speakers, terms
+        case keyPointAt = "key_point_at"
+        case decisionAt = "decision_at"
         case overview
         case keyPoints = "key_points"
         case decisions
@@ -81,6 +93,68 @@ public struct MeetingSummary: Codable, Hashable, Sendable {
         othersActions = try c.decodeIfPresent([OthersAction].self, forKey: .othersActions) ?? []
         openQuestions = try c.decodeIfPresent([String].self, forKey: .openQuestions) ?? []
         speakers = try c.decodeIfPresent([MeetingSpeaker].self, forKey: .speakers)
+        terms = try c.decodeIfPresent([MeetingTerm].self, forKey: .terms)
+        keyPointAt = try c.decodeIfPresent([String?].self, forKey: .keyPointAt)
+        decisionAt = try c.decodeIfPresent([String?].self, forKey: .decisionAt)
+    }
+
+    /// Seconds into the meeting where key point / decision `i` was said.
+    public func keyPointTime(_ i: Int) -> Double? { MeetingTime.at(keyPointAt, i) }
+    public func decisionTime(_ i: Int) -> Double? { MeetingTime.at(decisionAt, i) }
+}
+
+/// A name or term as the minutes settled on it, and how recognition heard it.
+public struct MeetingTerm: Codable, Hashable, Sendable {
+    public var name: String
+    public var note: String
+    public var heard: [String]
+
+    enum CodingKeys: String, CodingKey { case name, note, heard }
+
+    public init(name: String, note: String = "", heard: [String] = []) {
+        self.name = name
+        self.note = note
+        self.heard = heard
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let name = try c.decode(String.self, forKey: .name)
+        self.name = name
+        note = try c.decodeIfPresent(String.self, forKey: .note) ?? ""
+        heard = (try c.decodeIfPresent([String].self, forKey: .heard) ?? []).filter { $0 != name && !$0.isEmpty }
+    }
+}
+
+/// "mm:ss" / "h:mm:ss" stamps the model copies from the transcript, as seconds.
+public enum MeetingTime {
+    public static func seconds(_ stamp: String?) -> Double? {
+        guard let stamp else { return nil }
+        let parts = stamp.trimmingCharacters(in: CharacterSet(charactersIn: "[] ")).split(separator: ":").compactMap { Int($0) }
+        guard (2 ... 3).contains(parts.count) else { return nil }
+        return Double(parts.reduce(0) { $0 * 60 + $1 })
+    }
+
+    public static func stamp(_ seconds: Double) -> String {
+        let s = max(0, Int(seconds))
+        return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) : String(format: "%02d:%02d", s / 60, s % 60)
+    }
+
+    static func at(_ list: [String?]?, _ i: Int) -> Double? {
+        guard let list, i < list.count else { return nil }
+        return seconds(list[i])
+    }
+
+    /// The line a quote (a to-do's evidence) came from: the one sharing most of its characters.
+    public static func find(_ quote: String?, in transcript: [TranscriptSegment]) -> TranscriptSegment? {
+        guard let quote, !quote.isEmpty else { return nil }
+        let q = Array(quote.lowercased().filter { $0.isLetter || $0.isNumber })
+        var best: (TranscriptSegment, Double)?
+        for seg in transcript {
+            let score = HeardText.similarity(q, Array(seg.text.lowercased().filter { $0.isLetter || $0.isNumber }))
+            if score > (best?.1 ?? 0.45) { best = (seg, score) }
+        }
+        return best?.0
     }
 }
 
@@ -105,9 +179,13 @@ public struct OthersAction: Codable, Hashable, Sendable {
     public var who: String?
     public var task: String
     public var dueText: String?
+    /// "mm:ss" of the line it was given in.
+    public var at: String?
 
     enum CodingKeys: String, CodingKey {
-        case who, task
+        case who, task, at
         case dueText = "due_text"
     }
+
+    public var time: Double? { MeetingTime.seconds(at) }
 }

@@ -21,6 +21,7 @@ enum SettingsWindow {
             tabs.addTabViewItem(item)
         }
         pane("通用", "gearshape", GeneralSettings(cloud: cloud, reminders: reminders, calendar: calendar, notifier: notifier, mailTodos: mailTodos))
+        pane("会议", "waveform", MeetingSettingsView())
         pane("连接", "link", ConnectionSettings(github: github, wecom: wecom))
         pane("AI", "sparkles", AISettings(), width: 700)
         let window = NSWindow(contentViewController: tabs)
@@ -33,6 +34,76 @@ enum SettingsWindow {
     /// The connect sheets live on the main window: close Settings so the user lands there.
     static func closeForSheet() {
         NSApp.keyWindow?.performClose(nil)
+    }
+}
+
+// MARK: - 会议
+
+private struct MeetingSettingsView: View {
+    @AppStorage(MeetingSettings.languageKey) private var language = "auto"
+    @AppStorage(MeetingSettings.translateToKey) private var translateTo = ""
+    @AppStorage(MeetingSettings.liveNotesKey) private var liveNotes = true
+    @AppStorage(MeetingSettings.showLiveWindowKey) private var showLiveWindow = true
+    @AppStorage(MeetingSettings.shareLiveWindowKey) private var shareLiveWindow = false
+    @AppStorage(MeetingSettings.endOnHangUpKey) private var endOnHangUp = true
+    @AppStorage(MeetingSettings.silenceMinutesKey) private var silenceMinutes = 10
+    @AppStorage(MeetingSettings.promptOnCallKey) private var promptOnCall = true
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("识别语言", selection: $language) {
+                    ForEach(LiveTranscript.languageChoices, id: \.id) { Text($0.name).tag($0.id) }
+                }
+                Picker("字幕翻译", selection: $translateTo) {
+                    ForEach(LiveTranscript.translationChoices, id: \.id) { Text($0.name).tag($0.id) }
+                }
+                Toggle(isOn: $liveNotes) {
+                    Text("会中速记")
+                    Text("大约每 45 秒用新内容更新要点和双方的待办，会持续调用你配置的 AI 服务")
+                }
+            } header: {
+                Text("实时转写")
+            } footer: {
+                if !LiveTranscript.isSupported {
+                    Text("实时转写需要 macOS 26；当前系统会在会议结束后转写。").foregroundStyle(.secondary)
+                } else {
+                    Text("在本机识别，声音不出电脑。「自动识别」会在中文、英文、马来语等已下载的语言里自动切换。").foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                Toggle("开始录音时打开实况窗口", isOn: $showLiveWindow)
+                Toggle(isOn: $shareLiveWindow) {
+                    Text("共享屏幕时让对方看到实况窗口")
+                    Text("关闭时，屏幕共享、录屏和截图都拍不到它")
+                }
+            } header: {
+                Text("会议实况窗口")
+            }
+
+            Section {
+                Toggle(isOn: $promptOnCall) {
+                    Text("会议软件开始通话时提示录音")
+                    Text("腾讯会议、Zoom、飞书、Teams 等开始使用麦克风时")
+                }
+                Toggle(isOn: $endOnHangUp) {
+                    Text("会议软件挂断时自动结束录音")
+                    Text("挂断 30 秒后结束，期间可以点「继续录音」")
+                }
+                Picker("没人说话时结束录音", selection: $silenceMinutes) {
+                    Text("5 分钟后").tag(5)
+                    Text("10 分钟后").tag(10)
+                    Text("30 分钟后").tag(30)
+                    Text("从不").tag(0)
+                }
+            } header: {
+                Text("开始与结束")
+            } footer: {
+                Text("结束前会倒数 60 秒，可以继续录音。").foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

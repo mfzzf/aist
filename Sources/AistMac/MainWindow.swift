@@ -35,6 +35,10 @@ struct MainActions {
     var startMeeting: () -> Void
     var stopMeeting: () -> Void
     var retryMeeting: (UUID) -> Void
+    /// Write the minutes and both sides' to-dos as a mail to the attendees.
+    var emailMinutes: (UUID) -> Void
+    /// Bring up the "会议实况" window.
+    var showLive: () -> Void
     /// Record a calendar meeting, named after the event.
     var recordEvent: (CalEvent) -> Void
 }
@@ -899,6 +903,8 @@ private struct MeetingListColumn: View {
         return all.filter { m in
             var fields = [m.title, m.summary?.overview ?? "", m.notes ?? ""]
             fields += m.transcript?.map(\.text) ?? []
+            // A name finds the meetings where recognition misheard it, and the other way round.
+            for t in m.summary?.terms ?? [] { fields.append(([t.name] + t.heard).joined(separator: " ")) }
             return fields.contains { $0.lowercased().contains(q) }
         }
     }
@@ -1050,6 +1056,8 @@ private struct MeetingDetail: View {
     @State private var loaded = false
     @State private var confirmDelete = false
     @State private var showTranscript = false
+    /// A transcript line to bring into view (from a key point's / to-do's time).
+    @State private var jumpTarget: Int?
 
     private var canRegenerate: Bool { meeting.recording != nil && (meeting.status == .ready || meeting.status == .failed) }
 
@@ -1057,7 +1065,50 @@ private struct MeetingDetail: View {
         (meeting.todoIDs ?? []).compactMap { id in store.items.first { $0.id == id } }
     }
 
+    /// The transcript line said closest before `t`.
+    private func lineIndex(at t: Double) -> Int? {
+        guard let segs = meeting.transcript, !segs.isEmpty else { return nil }
+        return segs.lastIndex { $0.start <= t + 1 } ?? 0
+    }
+
+    /// Opens the transcript at the line said at `t` and plays the recording from there.
+    private func jump(to t: Double) {
+        showTranscript = true
+        jumpTarget = lineIndex(at: t)
+        if let rec = meeting.recording { player.play(rec, from: max(0, t - 0.5)) }
+    }
+
+    @ViewBuilder private func timeChip(_ t: Double?) -> some View {
+        if let t, meeting.transcript?.isEmpty == false {
+            Button { jump(to: t) } label: {
+                Label(DueFormatter.duration(t), systemImage: "text.quote")
+                    .monospacedDigit()
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("跳到转写里的原话并播放")
+        }
+    }
+
+    private var exportTodos: [MeetingExport.Todo] {
+        myTodos.map { MeetingExport.Todo(title: $0.title, due: DueFormatter.string($0.dueAt) ?? $0.dueText, done: $0.status == .done) }
+    }
+
     var body: some View {
+        ScrollViewReader { proxy in
+            form
+                .onChange(of: jumpTarget) {
+                    guard let i = jumpTarget else { return }
+                    // After the disclosure group has opened.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        withAnimation { proxy.scrollTo("seg\(i)", anchor: .center) }
+                        jumpTarget = nil
+                    }
+                }
+        }
+    }
+
+    private var form: some View {
         Form {
             Section {
                 TextField("标题", text: $title, prompt: Text("会议标题"), axis: .vertical)
@@ -1108,6 +1159,7 @@ private struct MeetingDetail: View {
                                 if let due = DueFormatter.string(todo.dueAt) ?? todo.dueText {
                                     Text(due).foregroundStyle(.secondary)
                                 }
+                                timeChip(meeting.transcript.flatMap { MeetingTime.find(todo.evidence, in: $0)?.start })
                             }
                         }
                     }
@@ -1136,33 +1188,63 @@ private struct MeetingDetail: View {
                         }
                     }
                 }
-                bullets("要点", s.keyPoints)
-                bullets("决定", s.decisions)
+                bullets("要点", s.keyPoints, time: s.keyPointTime)
+                bullets("决定", s.decisions, time: s.decisionTime)
                 if !s.othersActions.isEmpty {
                     Section("别人的待办") {
                         ForEach(Array(s.othersActions.enumerated()), id: \.offset) { _, a in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(a.task)
-                                let sub = [a.who, a.dueText].compactMap { $0 }.joined(separator: " · ")
-                                if !sub.isEmpty { Text(sub).font(.subheadline).foregroundStyle(.secondary) }
+                            HStack(alignment: .firstTextBaseline) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(a.task)
+                                    let sub = [a.who, a.dueText].compactMap { $0 }.joined(separator: " · ")
+                                    if !sub.isEmpty { Text(sub).font(.subheadline).foregroundStyle(.secondary) }
+                                }
+                                Spacer()
+                                timeChip(a.time)
                             }
                         }
                     }
                 }
                 bullets("待跟进", s.openQuestions)
+                if let terms = s.terms, !terms.isEmpty {
+                    Section {
+                        ForEach(terms, id: \.name) { t in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(t.name).fontWeight(.medium)
+                                    if !t.note.isEmpty { Text(t.note).foregroundStyle(.secondary) }
+                                }
+                                if !t.heard.isEmpty {
+                                    Text("转写里听成：\(t.heard.joined(separator: "、"))")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("人名与术语")
+                    } footer: {
+                        Text("搜索正确写法也能找到被听错的会议。").foregroundStyle(.secondary)
+                    }
+                }
             }
 
             if let segments = meeting.transcript, !segments.isEmpty {
                 Section {
                     DisclosureGroup("转写全文（\(segments.count) 段）", isExpanded: $showTranscript) {
-                        ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+                        ForEach(Array(segments.enumerated()), id: \.offset) { i, seg in
                             let current = isCurrent(seg)
                             HStack(alignment: .firstTextBaseline, spacing: 10) {
                                 Text(seg.speaker == .me ? "我" : "对方")
                                     .fontWeight(.medium)
                                     .foregroundStyle(seg.speaker == .me ? Color.accentColor : .secondary)
                                     .frame(width: 32, alignment: .leading)
-                                Text(seg.text).textSelection(.enabled)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(seg.text).textSelection(.enabled)
+                                    if let tr = seg.translation, !tr.isEmpty {
+                                        Text(tr).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                                    }
+                                }
                                 Spacer(minLength: 8)
                                 if let rec = meeting.recording {
                                     // Jump to this line to hear what was actually said.
@@ -1180,6 +1262,7 @@ private struct MeetingDetail: View {
                                 }
                             }
                             .listRowBackground(current ? Color.accentColor.opacity(0.08) : nil)
+                            .id("seg\(i)")
                         }
                     }
                 }
@@ -1204,6 +1287,21 @@ private struct MeetingDetail: View {
         .formStyle(.grouped)
         .toolbar {
             ToolbarItemGroup {
+                Button { actions.emailMinutes(meeting.id) } label: {
+                    Label("发送纪要", systemImage: "envelope")
+                }
+                .help("把纪要和双方的待办写成邮件，收件人默认是参会人")
+                .disabled(meeting.summary == nil)
+                Menu {
+                    Button("Markdown…") { export(.markdown) }
+                    Button("Word 文档…") { export(.word) }
+                    Button("字幕（SRT）…") { export(.srt) }
+                        .disabled(meeting.transcript?.isEmpty != false)
+                } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                }
+                .help("导出纪要和转写")
+                .disabled(meeting.summary == nil && meeting.transcript?.isEmpty != false)
                 Button { actions.retryMeeting(meeting.id) } label: {
                     Label(meeting.status == .failed ? "重试" : "重新生成纪要", systemImage: "arrow.clockwise")
                 }
@@ -1244,11 +1342,22 @@ private struct MeetingDetail: View {
             Section {
                 HStack {
                     PulsingDot()
-                    Text("正在录音，结束后自动转写并生成纪要")
+                    Text(LiveTranscript.isSupported ? "正在录音和实时转写，结束后生成完整纪要" : "正在录音，结束后自动转写并生成纪要")
                     Spacer()
                     if recorder.meetingID == meeting.id {
+                        Button("会议实况", action: actions.showLive)
                         Button("结束录音", action: actions.stopMeeting)
                     }
+                }
+            }
+            if recorder.meetingID == meeting.id, LiveTranscript.isSupported {
+                Section("速记") {
+                    LiveNotesView(session: recorder.session, live: recorder.live)
+                        .frame(minHeight: 120, maxHeight: 360)
+                }
+                Section("实时转写") {
+                    LiveTranscriptList(live: recorder.live, compact: true)
+                        .frame(height: 320)
                 }
             }
         case .transcribing, .summarizing:
@@ -1271,13 +1380,86 @@ private struct MeetingDetail: View {
         }
     }
 
-    @ViewBuilder private func bullets(_ title: String, _ items: [String]) -> some View {
+    @ViewBuilder private func bullets(_ title: String, _ items: [String], time: ((Int) -> Double?)? = nil) -> some View {
         if !items.isEmpty {
             Section(title) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, text in
-                    Text(text).textSelection(.enabled)
+                ForEach(Array(items.enumerated()), id: \.offset) { i, text in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(text).textSelection(.enabled)
+                        Spacer()
+                        timeChip(time?(i))
+                    }
                 }
             }
+        }
+    }
+
+    // MARK: Export
+
+    private enum ExportKind { case markdown, word, srt }
+
+    private func export(_ kind: ExportKind) {
+        let panel = NSSavePanel()
+        let name = meeting.title.replacingOccurrences(of: "/", with: "-")
+        let markdown = MeetingExport.markdown(meeting, myTodos: exportTodos, myName: UserIdentity.names.first ?? "我")
+        let data: Data?
+        switch kind {
+        case .markdown:
+            panel.allowedContentTypes = [.init(filenameExtension: "md") ?? .plainText]
+            panel.nameFieldStringValue = name + ".md"
+            data = Data(markdown.utf8)
+        case .srt:
+            panel.allowedContentTypes = [.init(filenameExtension: "srt") ?? .plainText]
+            panel.nameFieldStringValue = name + ".srt"
+            data = Data(MeetingExport.srt(meeting.transcript ?? []).utf8)
+        case .word:
+            panel.allowedContentTypes = [.init(filenameExtension: "docx") ?? .data]
+            panel.nameFieldStringValue = name + ".docx"
+            data = Self.docx(markdown)
+        }
+        guard let data, panel.runModal() == .OK, let url = panel.url else { return }
+        try? data.write(to: url)
+    }
+
+    /// Word via AppKit's own .docx writer, from the Markdown rendered as rich text.
+    private static func docx(_ markdown: String) -> Data? {
+        guard let parsed = try? NSAttributedString(
+            markdown: markdown,
+            options: .init(allowsExtendedAttributes: true, interpretedSyntax: .full, failurePolicy: .returnPartiallyParsedIfPossible)
+        ) else { return nil }
+        let text = NSMutableAttributedString(attributedString: parsed)
+        Self.applyBlockStyles(text)
+        return try? text.data(from: NSRange(location: 0, length: text.length),
+                              documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML])
+    }
+
+    /// Markdown parsing keeps headings and list items as presentation intents, not fonts or line
+    /// breaks; turn them into what a Word reader sees.
+    private static func applyBlockStyles(_ text: NSMutableAttributedString) {
+        let full = NSRange(location: 0, length: text.length)
+        var blocks: [(NSRange, PresentationIntent?)] = []
+        text.enumerateAttribute(.presentationIntentAttributeName, in: full) { value, range, _ in
+            blocks.append((range, value as? PresentationIntent))
+        }
+        let base = NSFont.systemFont(ofSize: 12)
+        for (range, intent) in blocks.reversed() {
+            var font = base
+            var prefix = ""
+            for component in intent?.components ?? [] {
+                switch component.kind {
+                case let .header(level): font = NSFont.boldSystemFont(ofSize: level == 1 ? 20 : 15)
+                case .listItem: prefix = "• "
+                case .blockQuote: font = NSFont.systemFont(ofSize: 11)
+                default: break
+                }
+            }
+            text.enumerateAttribute(.font, in: range) { value, sub, _ in
+                let traits = (value as? NSFont)?.fontDescriptor.symbolicTraits ?? []
+                let f = traits.contains(.bold) ? NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) : font
+                text.addAttribute(.font, value: f, range: sub)
+            }
+            text.insert(NSAttributedString(string: "\n"), at: NSMaxRange(range))
+            if !prefix.isEmpty { text.insert(NSAttributedString(string: prefix), at: range.location) }
         }
     }
 }

@@ -26,6 +26,16 @@ struct CalEvent: Identifiable, Hashable {
     /// 企业微信 / 腾讯会议 meeting number.
     var meetingCode: String?
     var room: String?
+    /// Attendees' addresses, where the calendar has them (for mailing the minutes).
+    var attendeeEmails: [String] = []
+
+    /// A call noticed in a meeting app (not on the calendar): offered for recording like an event.
+    static func call(app: String, bundleID: String) -> CalEvent {
+        CalEvent(eventID: "call:\(bundleID)", title: "\(app) 通话", start: .now, end: .now.addingTimeInterval(3600),
+                 isAllDay: false, attendees: [], calendarTitle: app, color: .green)
+    }
+
+    var isCall: Bool { eventID.hasPrefix("call:") }
 
     /// Has other people or a call link: a meeting worth recording, not a personal block.
     var isMeeting: Bool {
@@ -139,7 +149,11 @@ final class CalendarCenter: ObservableObject {
             },
             organizer: e.organizer?.name,
             calendarTitle: e.calendar?.title ?? "",
-            color: Color(cgColor: e.calendar?.cgColor ?? NSColor.systemBlue.cgColor)
+            color: Color(cgColor: e.calendar?.cgColor ?? NSColor.systemBlue.cgColor),
+            attendeeEmails: (e.attendees ?? []).compactMap { p in
+                let s = p.url.absoluteString
+                return s.lowercased().hasPrefix("mailto:") ? String(s.dropFirst(7)).removingPercentEncoding : nil
+            }
         )
     }
 

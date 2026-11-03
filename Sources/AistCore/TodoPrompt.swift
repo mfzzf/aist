@@ -260,7 +260,7 @@ public enum TodoPrompt {
         description: "提交会议纪要和用户本人的待办。没有的项给空数组。",
         schema: """
             {"type": "object", "additionalProperties": false,
-             "required": ["analysis", "speakers", "title", "overview", "key_points", "decisions", "open_questions", "my_todos", "others_todos"],
+             "required": ["analysis", "speakers", "title", "overview", "key_points", "key_point_at", "decisions", "decision_at", "open_questions", "my_todos", "others_todos", "terms"],
              "properties": {
                "analysis": {"type": "string", "description": "1～3 句：谁主导、谈了什么、哪些事落在用户身上"},
                "speakers": {"type": "array", "description": "除用户外实际发言的人，按会议信息推断", "items": {"type": "object", "additionalProperties": false,
@@ -271,12 +271,20 @@ public enum TodoPrompt {
                "title": {"type": "string", "description": "会议主题，不超过 16 字"},
                "overview": {"type": "string", "description": "两三句话的概要"},
                "key_points": {"type": "array", "items": {"type": "string"}},
+               "key_point_at": {"type": "array", "description": "与 key_points 一一对应：最能支撑该要点的那句转写的时间戳（照抄 [mm:ss] 里的 mm:ss），找不到给 null", "items": {"type": ["string", "null"]}},
                "decisions": {"type": "array", "items": {"type": "string"}},
+               "decision_at": {"type": "array", "description": "与 decisions 一一对应，同上", "items": {"type": ["string", "null"]}},
                "open_questions": {"type": "array", "items": {"type": "string"}},
                "my_todos": {"type": "array", "items": \(todoItemSchema)},
                "others_todos": {"type": "array", "items": {"type": "object", "additionalProperties": false,
-                 "required": ["who", "task", "due_text"],
-                 "properties": {"who": {"type": ["string", "null"]}, "task": {"type": "string"}, "due_text": {"type": ["string", "null"]}}}}
+                 "required": ["who", "task", "due_text", "at"],
+                 "properties": {"who": {"type": ["string", "null"]}, "task": {"type": "string"}, "due_text": {"type": ["string", "null"]},
+                                "at": {"type": ["string", "null"], "description": "交代这件事的那句转写的时间戳 mm:ss"}}}},
+               "terms": {"type": "array", "description": "会上出现的人名、产品名、术语，以及转写里把它听错成的写法", "items": {"type": "object", "additionalProperties": false,
+                 "required": ["name", "note", "heard"],
+                 "properties": {"name": {"type": "string", "description": "正确写法"},
+                                "note": {"type": "string", "description": "一句话：是谁 / 是什么"},
+                                "heard": {"type": "array", "items": {"type": "string"}, "description": "转写里出现过的错误写法（原样照抄），没有就空数组"}}}}
              }}
             """
     )

@@ -25,6 +25,7 @@ final class PanelController {
     var onCapture: (() -> Void)?
     var onStartMeeting: (() -> Void)?
     var onStopMeeting: (() -> Void)?
+    var onShowLive: (() -> Void)?
     var onOpenMain: ((MainModel.Pane?, UUID?) -> Void)?
     var onRecordEvent: ((CalEvent) -> Void)?
 
@@ -60,6 +61,7 @@ final class PanelController {
                 capture: { [weak self] in self?.onCapture?() },
                 startMeeting: { [weak self] in self?.onStartMeeting?() },
                 stopMeeting: { [weak self] in self?.onStopMeeting?() },
+                showLive: { [weak self] in self?.onShowLive?() },
                 openMain: { [weak self] pane, id in
                     self?.close()
                     self?.onOpenMain?(pane, id)

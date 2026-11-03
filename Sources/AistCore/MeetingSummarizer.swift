@@ -28,6 +28,12 @@ public struct MeetingSummarizer: Sendable {
                 .filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             summary = try MeetingSummary(from: decoder)
         }
+
+        /// Valid JSON with none of the minutes in it (a wrapper object, a refusal): not minutes.
+        var isEmpty: Bool {
+            summary.overview.isEmpty && summary.keyPoints.isEmpty && summary.decisions.isEmpty && myTodos.isEmpty
+                && summary.othersActions.isEmpty
+        }
     }
 
     public func summarize(transcript: [TranscriptSegment], startedAt: Date, existing: [TodoItem],
@@ -45,18 +51,20 @@ public struct MeetingSummarizer: Sendable {
         )
         switch result {
         case let .arguments(data):
-            do { return try JSONDecoder().decode(Output.self, from: data) } catch {
+            guard let out = try? JSONDecoder().decode(Output.self, from: data), !out.isEmpty else {
                 throw TodoExtractor.ExtractError.unparsable(String(decoding: data, as: UTF8.self))
             }
+            return out
         case let .text(raw):
-            return try Self.parse(raw)
+            let out = try Self.parse(raw)
+            if out.isEmpty { throw TodoExtractor.ExtractError.unparsable(raw) }
+            return out
         }
     }
 
-    static func format(_ transcript: [TranscriptSegment]) -> String {
+    public static func format(_ transcript: [TranscriptSegment]) -> String {
         transcript.map { seg in
-            let s = Int(seg.start)
-            return String(format: "[%02d:%02d] ", s / 60, s % 60) + (seg.speaker == .me ? "我" : "对方") + "：" + seg.text
+            "[\(MeetingTime.stamp(seg.start))] " + (seg.speaker == .me ? "我" : "对方") + "：" + seg.text
         }.joined(separator: "\n")
     }
 
@@ -79,11 +87,13 @@ public struct MeetingSummarizer: Sendable {
         - decisions：做出的决定
         - open_questions：没有结论、需要跟进的问题（包括讨论过但没落到具体人的事）
         - my_todos：用户本人的待办，按上面的判断方式和写法，source 为 null
-        - others_todos：落在别人身上的事：{"who": "谁或 null", "task": "...", "due_text": "原文期限或 null"}
+        - others_todos：落在别人身上的事：{"who": "谁或 null", "task": "...", "due_text": "原文期限或 null", "at": "mm:ss 或 null"}
+        - key_point_at / decision_at：与 key_points / decisions 一一对应，写最能支撑该条的那句转写的时间（照抄行首 [mm:ss] 里的 mm:ss），找不到写 null
+        - terms：会上出现的人名、公司、产品、术语。name 写正确写法（参照会议信息、上下文推断），heard 列出转写里把它听错的写法（原样照抄，供日后搜索），note 一句话说明它是什么。纪要正文里一律用正确写法
 
         ## 提交结果
         调用 record_minutes 工具提交，没有的项给空数组。如果无法调用工具，就只输出同样结构的 JSON 对象，不要任何其他文字：
-        {"analysis": "1～3 句：谁主导、谈了什么、哪些事落在用户身上", "speakers": [{"name": "...", "said": "...", "certain": true}], "title": "...", "overview": "...", "key_points": [], "decisions": [], "open_questions": [], "my_todos": [], "others_todos": []}
+        {"analysis": "1～3 句：谁主导、谈了什么、哪些事落在用户身上", "speakers": [{"name": "...", "said": "...", "certain": true}], "title": "...", "overview": "...", "key_points": [], "key_point_at": [], "decisions": [], "decision_at": [], "open_questions": [], "my_todos": [], "others_todos": [], "terms": [{"name": "...", "note": "...", "heard": []}]}
         my_todos 每项：{"title": "...", "requester": "谁提的或 null", "source": null, "due_text": "原文或 null", "due_at": "ISO 8601 或 null", "priority": "high|medium|low", "evidence": "转写中最能说明这件事的一句", "duplicate_of": "已有待办的 id 或 null", "suggestion": "下一步建议或 null"}
         """
     }
