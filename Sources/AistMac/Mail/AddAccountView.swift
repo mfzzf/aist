@@ -3,7 +3,7 @@ import AppKit
 import SwiftUI
 
 /// "添加账户", laid out like Mail's: type an address and continue (aist recognizes the service),
-/// or pick a provider. Gmail / Outlook then sign in through the browser; the rest ask for an
+/// or pick a provider. Outlook then signs in through the browser; the rest (Gmail included) ask for an
 /// authorization code / app password, with a link to where to get one.
 struct AddAccountView: View {
     @ObservedObject var mail: MailCenter
@@ -104,7 +104,9 @@ struct AddAccountView: View {
     /// Route to the right sign-in for a provider (picked, or detected from the address).
     private func proceed(with provider: MailProvider) {
         error = nil
-        if let service = provider.oauth {
+        // Gmail takes an app password: Google's OAuth for full mail access needs app verification
+        // (or a per-user test list), so only Outlook signs in through the browser.
+        if provider != .gmail, let service = provider.oauth {
             if OAuthClient.isConfigured(service) {
                 Task { await signIn(provider, service) }
                 return
