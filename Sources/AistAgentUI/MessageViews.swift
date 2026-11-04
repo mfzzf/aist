@@ -67,14 +67,15 @@ struct AssistantTurn: View {
     var onRetry: (() -> Void)?
 
     var body: some View {
+        let parts = parts
         VStack(alignment: .leading, spacing: compact ? 6 : 10) {
-            ForEach(Array(displayed.enumerated()), id: \.offset) { _, item in
+            ForEach(Array(displayed(parts).enumerated()), id: \.offset) { _, item in
                 switch item {
                 case let .part(part): partView(part)
                 case let .activity(steps): ActivitySummary(parts: steps, compact: compact) { partView($0) }
                 }
             }
-            if live, !hasVisibleProgress {
+            if live, !Self.hasVisibleProgress(parts) {
                 ShimmerText("思考中…", font: compact ? .caption : .callout)
             }
             if let failed = messages.last, !live {
@@ -107,6 +108,11 @@ struct AssistantTurn: View {
     }
 
     private var parts: [Part] {
+        Self.parts(messages: messages, results: results, live: live, runningTools: runningTools)
+    }
+
+    static func parts(messages: [AssistantMessage], results: [String: ToolResultMessage],
+                      live: Bool, runningTools: Set<String>) -> [Part] {
         var out: [Part] = []
         for (mi, m) in messages.enumerated() {
             for (ci, c) in m.content.enumerated() {
@@ -137,8 +143,9 @@ struct AssistantTurn: View {
 
     /// While answering, every step shows; once done, the steps fold into one summary line where
     /// the first of them was.
-    private var displayed: [Displayed] {
-        let all = parts
+    private func displayed(_ all: [Part]) -> [Displayed] { Self.displayed(all, live: live) }
+
+    static func displayed(_ all: [Part], live: Bool) -> [Displayed] {
         guard !live else { return all.map { .part($0) } }
         let steps = all.filter { if case .text = $0 { false } else { true } }
         guard !steps.isEmpty else { return all.map { .part($0) } }
@@ -151,7 +158,7 @@ struct AssistantTurn: View {
         return out
     }
 
-    private var hasVisibleProgress: Bool {
+    static func hasVisibleProgress(_ parts: [Part]) -> Bool {
         guard let last = parts.last else { return false }
         switch last {
         case .text: return true
@@ -171,7 +178,10 @@ struct AssistantTurn: View {
 
     // MARK: Footer
 
-    private var sources: [WebSource] {
+    private var sources: [WebSource] { Self.sources(messages: messages, results: results) }
+
+    /// Sites behind the answer: hosted-search hits and pages fetched, one per host.
+    static func sources(messages: [AssistantMessage], results: [String: ToolResultMessage]) -> [WebSource] {
         var seen = Set<String>()
         var out: [WebSource] = []
         for m in messages {
@@ -183,38 +193,54 @@ struct AssistantTurn: View {
                 }
             }
         }
-        // One chip per site.
         return out.filter { seen.insert($0.host).inserted }
     }
 
-    private var answerText: String {
+    static func answerText(_ messages: [AssistantMessage]) -> String {
         messages.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 
-    @ViewBuilder private var footer: some View {
-        let sources = sources
-        if !sources.isEmpty { SourcesPill(sources: sources) }
-        if !answerText.isEmpty || onRetry != nil {
-            HStack(spacing: 2) {
-                if !answerText.isEmpty {
-                    CopyButton(text: answerText)
-                }
-                if isLast, let onRetry {
-                    Button(action: onRetry) {
-                        Image(systemName: "arrow.clockwise")
+    private var footer: some View {
+        AssistantFooter(sources: sources, answerText: Self.answerText(messages), isLast: isLast,
+                        model: messages.last.flatMap { $0.usage.output > 0 && !compact ? $0.model : nil },
+                        compact: compact, onRetry: onRetry)
+    }
+}
+
+/// Under a finished answer: the sources pill, copy, retry and the model that answered.
+struct AssistantFooter: View {
+    let sources: [WebSource]
+    let answerText: String
+    let isLast: Bool
+    let model: String?
+    var compact: Bool
+    var onRetry: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 6 : 10) {
+            if !sources.isEmpty { SourcesPill(sources: sources) }
+            if !answerText.isEmpty || onRetry != nil {
+                HStack(spacing: 2) {
+                    if !answerText.isEmpty {
+                        CopyButton(text: answerText)
                     }
-                    .help("重新回答")
+                    if isLast, let onRetry {
+                        Button(action: onRetry) {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .help("重新回答")
+                    }
+                    if let model {
+                        Text(model)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 6)
+                    }
                 }
-                if let m = messages.last, m.usage.output > 0, !compact {
-                    Text(m.model)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, 6)
-                }
+                .buttonStyle(.borderless)
+                .font(.callout)
+                .foregroundStyle(.secondary)
             }
-            .buttonStyle(.borderless)
-            .font(.callout)
-            .foregroundStyle(.secondary)
         }
     }
 }

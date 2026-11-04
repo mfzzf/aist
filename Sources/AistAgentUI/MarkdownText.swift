@@ -30,7 +30,8 @@ public struct MarkdownText: View {
         }
         .font(compact ? .callout : .body)
         .lineSpacing(compact ? 1 : 3)
-        .textSelection(.enabled)
+        // No per-Text selection: on macOS it gives every Text an AppKit interaction view with its
+        // own TextKit layout pass, which was a third of the cost of showing a conversation.
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -85,7 +86,7 @@ private struct BlockBody: View {
                 .fontWeight(.semibold)
                 .padding(.top, compact ? 2 : 4)
         case let .paragraph(s):
-            rich(s).fixedSize(horizontal: false, vertical: true)
+            rich(s).frame(maxWidth: .infinity, alignment: .leading)
         case let .list(items):
             VStack(alignment: .leading, spacing: compact ? 3 : 5) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -94,7 +95,7 @@ private struct BlockBody: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .frame(minWidth: 14, alignment: .trailing)
-                        rich(item.text).fixedSize(horizontal: false, vertical: true)
+                        rich(item.text).frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.leading, CGFloat(item.level) * 18)
                 }
@@ -102,7 +103,7 @@ private struct BlockBody: View {
         case let .quote(s):
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 1.5).fill(.tertiary).frame(width: 3)
-                rich(s).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                rich(s).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             }
         case let .code(lang, code):
             CodeBlock(language: lang, code: code, compact: compact)

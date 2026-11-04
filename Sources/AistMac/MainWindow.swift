@@ -220,14 +220,11 @@ struct MainView: View {
         .onChange(of: model.pane) { old, pane in
             Task { @MainActor in paneChanged(from: old, to: pane) }
         }
-        // A new conversation gets its id with the first answer: select it in the sidebar.
-        .onChange(of: agent.session.conversationID) { _, id in
-            Task { @MainActor in
-                guard model.pane.isChat else { return }
-                let pane: MainModel.Pane = id.map { .conversation($0) } ?? .chat
-                if model.pane != pane { model.pane = pane }
-            }
-        }
+        // Keeps the pane on the conversation the session shows (a new conversation gets its id
+        // with the first answer). Its own view, so it reacts to the session at once: as an
+        // onChange here it only ran when MainView happened to re-render, fired with a stale id,
+        // and bounced the pane back and forth.
+        .background(ConversationPaneSync(session: agent.session, model: model))
         .navigationTitle(title)
         .alert("新建待办", isPresented: $adding) {
             TextField("要做的事", text: $newTitle)
@@ -255,6 +252,7 @@ struct MainView: View {
     }
 
     private func paneChanged(from old: MainModel.Pane, to pane: MainModel.Pane) {
+        NavTrace.log("paneChanged \(old) -> \(pane)")
         if !pane.isChat, !agent.library.query.isEmpty { agent.library.query = "" }
         if case let .conversation(id) = pane { agent.library.selection.selected = id }
         else { agent.library.selection.selected = nil }
@@ -429,6 +427,26 @@ private struct ChatPane: View {
     }
 }
 
+/// Mirrors `session.conversationID` into `model.pane` while the Q&A pane is up.
+private struct ConversationPaneSync: View {
+    @ObservedObject var session: AgentSession
+    @ObservedObject var model: MainModel
+
+    var body: some View {
+        Color.clear
+            .onChange(of: session.conversationID) { _, id in
+                Task { @MainActor in
+                    guard model.pane.isChat else { return }
+                    let pane: MainModel.Pane = id.map { .conversation($0) } ?? .chat
+                    if model.pane != pane {
+                        NavTrace.log("conversationID changed -> pane \(pane) (was \(model.pane))")
+                        model.pane = pane
+                    }
+                }
+            }
+    }
+}
+
 /// Saved conversations at the bottom of the sidebar.
 private struct ChatSidebarSection: View {
     @ObservedObject var model: MainModel
@@ -468,6 +486,7 @@ private struct Sidebar: View {
         List(selection: Binding(
             get: { model.pane },
             set: { pane in
+                NavTrace.log("list.selection set \(String(describing: pane)) (pane \(model.pane))")
                 guard let pane, pane != model.pane else { return }
                 model.pane = pane
                 model.selection = nil

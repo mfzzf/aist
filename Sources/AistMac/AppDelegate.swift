@@ -1,3 +1,4 @@
+import AistAgentUI
 import AistCore
 import AppKit
 import Combine
@@ -50,12 +51,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Testing hooks: `-aistOpenPane chat` opens the main window at a pane; `-aistAsk "<question>"`
     /// also sends a question there. Only act when passed explicitly on the command line.
+    private static var clickSerial = 1000
+
     private func openFromLaunchArguments() {
         let args = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
         guard let pane = args["aistOpenPane"] as? String else { return }
+        FileManager.default.createFile(atPath: "/tmp/aist-nav.log", contents: nil)
+        NavTrace.file = FileHandle(forWritingAtPath: "/tmp/aist-nav.log")
         switch pane {
         case "chat":
             mainWindow.show(.chat)
+            // -aistOpenConversation <id prefix>: show that saved conversation once the list is loaded.
+            if let prefix = args["aistOpenConversation"] as? String {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(1.5))
+                    guard let self, let id = self.agent.library.conversations.first(where: { $0.id.uuidString.hasPrefix(prefix.uppercased()) })?.id else { return }
+                    self.mainWindow.show(.conversation(id))
+                }
+            }
             if args["aistPickModel"] != nil { agent.session.pickingModel = true }
             if let q = args["aistAsk"] as? String, !q.isEmpty {
                 agent.session.draft = q
@@ -74,9 +87,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log.seekToEndOfFile()
             func note(_ s: String) { log.write("\(Date().formatted(date: .omitted, time: .standard)) \(s)\n".data(using: .utf8)!) }
             var last = CFAbsoluteTimeGetCurrent()
-            let stall = Timer(timeInterval: 0.016, repeats: true) { _ in
+            // Main thread time lost since the last switch: every gap over a 120 Hz frame counts.
+            var blocked = 0.0, worst = 0.0
+            let stall = Timer(timeInterval: 0.008, repeats: true) { _ in
                 let now = CFAbsoluteTimeGetCurrent()
-                if now - last > 0.05 { note(String(format: "stall %.0f ms", (now - last) * 1000)) }
+                let gap = now - last
+                if gap > 0.012 {
+                    blocked += gap - 0.008; worst = max(worst, gap)
+                    note(String(format: "    gap %.0f ms", gap * 1000))
+                }
                 last = now
             }
             RunLoop.main.add(stall, forMode: .common)
@@ -88,12 +107,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for n in 0..<40 {
                     guard !ids.isEmpty else { break }
                     let id = ids[n % ids.count]
-                    let t = CFAbsoluteTimeGetCurrent()
+                    if n > 0 { note(String(format: "  blocked %.0f ms, worst gap %.0f ms", blocked * 1000, worst * 1000)) }
+                    blocked = 0; worst = 0
                     self.mainWindow.show(.conversation(id))
-                    note(String(format: "switch #%d -> %@ set in %.1f ms", n, id.uuidString.prefix(8) as CVarArg, (CFAbsoluteTimeGetCurrent() - t) * 1000))
+                    note(String(format: "switch #%d -> %@", n, id.uuidString.prefix(8) as CVarArg))
                     try? await Task.sleep(for: .seconds(every))
                 }
+                note(String(format: "  blocked %.0f ms, worst gap %.0f ms", blocked * 1000, worst * 1000))
                 note("done")
+            }
+        }
+        // -aistClick "x,y[;x,y…]": synthesised clicks at window points (from the top-left), 1.5 s apart,
+        // starting 2 s in; the resulting pane is logged to /tmp/aist-cycle.log.
+        if let spec = args["aistClick"] as? String {
+            let points = spec.split(separator: ";").compactMap { pair -> NSPoint? in
+                let xy = pair.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+                return xy.count == 2 ? NSPoint(x: xy[0], y: xy[1]) : nil
+            }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard let self, let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.frame.width > 400 }),
+                      let content = window.contentView else { return }
+                let log = FileHandle(forWritingAtPath: "/tmp/aist-cycle.log") ?? {
+                    FileManager.default.createFile(atPath: "/tmp/aist-cycle.log", contents: nil)
+                    return FileHandle(forWritingAtPath: "/tmp/aist-cycle.log")!
+                }()
+                log.seekToEndOfFile()
+                for p in points {
+                    let location = NSPoint(x: p.x, y: content.bounds.height - p.y)
+                    if let hit = content.hitTest(location) {
+                        let f = hit.convert(hit.bounds, to: nil)
+                        NavTrace.log("click.hit \(type(of: hit)) frame y=\(Int(content.bounds.height - f.maxY))..\(Int(content.bounds.height - f.minY)) order=\(self.agent.library.conversations.prefix(6).map { String($0.id.uuidString.prefix(4)) }.joined(separator: ","))")
+                    }
+                    // Down, a human-length press, up — SwiftUI's press tracking wants the gap.
+                    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                        Self.clickSerial += 1
+                        if let e = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                                                      timestamp: ProcessInfo.processInfo.systemUptime,
+                                                      windowNumber: window.windowNumber, context: nil,
+                                                      eventNumber: Self.clickSerial, clickCount: 1, pressure: 1) {
+                            NSApp.sendEvent(e)
+                        }
+                        if type == .leftMouseDown { try? await Task.sleep(for: .milliseconds(70)) }
+                    }
+                    try? await Task.sleep(for: .seconds(1.5))
+                    let line = "\(Date().formatted(date: .omitted, time: .standard)) clicked \(p.x),\(p.y) -> pane \(self.mainWindow.model.pane)\n"
+                    log.write(line.data(using: .utf8)!)
+                }
             }
         }
         // -aistSnapshot <path.png>: write the window to a file every 3 s (each shot to <path>-<n>.png).

@@ -33,9 +33,11 @@ public struct AgentChatView: View {
                     .transition(.opacity)
             } else {
                 VStack(spacing: 0) {
+                    #if os(macOS)
+                    TranscriptTextView(rows: rows, session: session, compact: compact, width: columnWidth)
+                    #else
                     Transcript(rows: rows, session: session, compact: compact, width: columnWidth)
-                        // A different conversation gets a fresh scroll view, already at its end.
-                        .id(session.openSerial)
+                    #endif
                     composer
                         .padding(.bottom, compact ? 10 : 18)
                 }
@@ -122,9 +124,12 @@ private struct Transcript: View {
                     .frame(maxWidth: .infinity)
                 }
                 .defaultScrollAnchor(.bottom)
+                // A question just sent slides to the top; a conversation just opened shows its end.
                 .onChange(of: Self.latestID(latest)) { _, id in
+                    guard session.isRunning else { return }
                     withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo(id, anchor: .top) }
                 }
+
             }
         }
     }

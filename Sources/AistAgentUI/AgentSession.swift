@@ -90,6 +90,7 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// delivered the click. (Swapping synchronously from an `onChange` made SwiftUI re-enter its
     /// own layout for every published property and lock up.) A newer click wins over a slower load.
     public func open(_ id: UUID?) {
+        NavTrace.log("session.open \(id?.uuidString.prefix(8) ?? "nil") current=\(conversationID?.uuidString.prefix(8) ?? "nil") cached=\(id.map { recent[$0] != nil } ?? false)")
         guard id != conversationID || id == nil else { return }
         guard let id, let store else { reset(); return }
         openGeneration += 1
@@ -125,6 +126,7 @@ public final class AgentSession: ObservableObject, Identifiable {
     }
 
     private func show(_ loaded: [Message], id: UUID) {
+        NavTrace.log("session.show \(id.uuidString.prefix(8)) messages=\(loaded.count)")
         stop()
         // Continue with the model that answered last, if it's still offered.
         var model = selectedModel

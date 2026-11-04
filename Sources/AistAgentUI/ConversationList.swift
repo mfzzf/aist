@@ -144,9 +144,13 @@ public struct ConversationRows: View {
     public var body: some View {
         ForEach(library.conversations.prefix(limit)) { c in
             ConversationRow(id: c.id, title: c.title, selection: library.selection) {
+                NavTrace.log("row.click \(c.id.uuidString.prefix(8))")
                 library.selection.selected = c.id
                 onSelect(c.id)
             }
+                // The row draws its own selection; the List mustn't try to select it as well,
+                // or its selection tracking swallows every other click before the button sees it.
+                .selectionDisabled()
                 .contextMenu {
                     Button("重命名…") {
                         newTitle = c.title
