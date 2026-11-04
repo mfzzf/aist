@@ -15,6 +15,10 @@ final class MailCenter: ObservableObject {
     @Published private(set) var loading: Set<String> = []
     @Published private(set) var errors: [UUID: String] = [:]
     @Published private(set) var bodies: [String: MailBody] = [:]
+    /// Messages in each whole folder on the server, keyed like `messages`.
+    @Published private(set) var totals: [String: Int] = [:]
+
+    static let pageSize = 100
 
     private var sessions: [UUID: MailSession] = [:]
     private var subscriptions: Set<AnyCancellable> = []
@@ -52,6 +56,10 @@ final class MailCenter: ObservableObject {
 
     func list(_ account: UUID, _ folder: String) -> [MailHeader] { messages[key(account, folder)] ?? [] }
 
+    func hasMore(_ account: UUID, _ folder: String) -> Bool {
+        list(account, folder).count < totals[key(account, folder)] ?? 0
+    }
+
     func unreadCount(_ account: UUID) -> Int { list(account, inbox(of: account)).filter { !$0.seen }.count }
 
     var totalUnread: Int { accounts.accounts.reduce(0) { $0 + unreadCount($1.id) } }
@@ -88,6 +96,7 @@ final class MailCenter: ObservableObject {
         folders[id] = nil
         for k in messages.keys where k.hasPrefix(id.uuidString) { messages[k] = nil }
         try? FileManager.default.removeItem(at: cacheURL(id))
+        try? FileManager.default.removeItem(at: MailSession.indexURL(id))
         accounts.remove(id)
     }
 
@@ -112,8 +121,31 @@ final class MailCenter: ObservableObject {
         loading.insert(k)
         defer { loading.remove(k) }
         do {
-            messages[k] = try await session.headers(in: name)
+            // Keep however many messages "load more" has already shown.
+            let shown = max(Self.pageSize, messages[k]?.count ?? 0)
+            let page = try await session.headers(in: name, limit: shown)
+            messages[k] = page.headers
+            totals[k] = page.total
             errors[id] = nil
+            saveCache(id)
+        } catch {
+            errors[id] = Self.describe(error)
+        }
+    }
+
+    /// Appends the next page of older messages to a folder's list.
+    func loadMore(_ id: UUID, folder: String) async {
+        guard let account = accounts.account(id) else { return }
+        let k = key(id, folder)
+        guard !loading.contains(k), hasMore(id, folder) else { return }
+        loading.insert(k)
+        defer { loading.remove(k) }
+        do {
+            let current = messages[k] ?? []
+            let page = try await session(account).headers(in: folder, offset: current.count, limit: Self.pageSize)
+            let seen = Set(current.map(\.id))
+            messages[k] = (current + page.headers.filter { !seen.contains($0.id) }).sorted { $0.date > $1.date }
+            totals[k] = page.total
             saveCache(id)
         } catch {
             errors[id] = Self.describe(error)

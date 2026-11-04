@@ -150,10 +150,34 @@ enum MailError: LocalizedError {
 // MARK: - Session
 
 /// One account's IMAP connection (SwiftMail), reused across calls and re-opened once on failure.
+struct MailPage: Sendable {
+    var headers: [MailHeader]
+    /// Messages in the whole folder.
+    var total: Int
+}
+
 actor MailSession {
     let account: MailAccount
     private var imap: IMAPServer?
     private var selected: String?
+    /// Folders whose ENVELOPE replies the IMAP parser rejects (QQ Mail sends some it can't read).
+    private var envelopeless: Set<String> = []
+    /// Every message's UID and arrival time, per folder, so "newest" means newest by date.
+    /// Kept on disk: building it reads every message's date, about a second per thousand on QQ.
+    private lazy var indexes: [String: FolderIndex] = {
+        guard let data = try? Data(contentsOf: Self.indexURL(account.id)) else { return [:] }
+        return (try? JSONDecoder().decode([String: FolderIndex].self, from: data)) ?? [:]
+    }()
+
+    static func indexURL(_ id: UUID) -> URL {
+        MailAccountStore.directory.appendingPathComponent("\(id.uuidString)-index.json")
+    }
+
+    private struct FolderIndex: Codable {
+        var validity: UIDValidity?
+        var uidNext: SwiftMail.UID?
+        var dates: [UInt32: Date] = [:]
+    }
 
     init(account: MailAccount) { self.account = account }
 
@@ -242,24 +266,114 @@ actor MailSession {
         return .other
     }
 
-    /// The newest `limit` messages of a folder, newest first, plus its unread count.
-    func headers(in mailbox: String, limit: Int = 100) async throws -> [MailHeader] {
-        try await withServer { server in
-            guard let selection = try await select(mailbox, on: server, force: true),
-                  let range = selection.latest(limit)
-            else { return [] }
-            let infos = try await server.fetchMessageInfosBulk(
-                using: range, options: [.envelope, .flags, .internalDate],
-                headerFields: ["References"]
-            )
-            return infos.compactMap { Self.header($0, mailbox: mailbox) }.sorted { $0.date > $1.date }
+    /// One page of a folder, newest first by arrival time, and how many messages the folder has.
+    func headers(in mailbox: String, offset: Int = 0, limit: Int = 100) async throws -> MailPage {
+        if !envelopeless.contains(mailbox) {
+            do {
+                return try await page(in: mailbox, offset: offset, limit: limit, envelope: true)
+            } catch where Self.isParseFailure(error) {
+                // One malformed ENVELOPE fails the whole FETCH. Read the header lines instead,
+                // which SwiftMail decodes itself, and remember to skip ENVELOPE for this folder.
+                envelopeless.insert(mailbox)
+            }
         }
+        return try await page(in: mailbox, offset: offset, limit: limit, envelope: false)
+    }
+
+    private static let headerFields = ["Date", "Subject", "From", "Reply-To", "To", "Cc", "Message-ID", "References"]
+
+    private func page(in mailbox: String, offset: Int, limit: Int, envelope: Bool) async throws -> MailPage {
+        try await withServer { server in
+            guard let selection = try await select(mailbox, on: server, force: true) else {
+                return MailPage(headers: [], total: 0)
+            }
+            let order = try await newestFirst(mailbox, selection, on: server)
+            let uids = order.dropFirst(offset).prefix(limit).map { SwiftMail.UID($0) }
+            guard !uids.isEmpty else { return MailPage(headers: [], total: order.count) }
+            let infos = try await server.fetchMessageInfosBulk(
+                using: UIDSet(Array(uids)),
+                options: envelope ? [.envelope, .flags, .internalDate] : [.flags, .internalDate],
+                headerFields: envelope ? ["References"] : Self.headerFields
+            )
+            let headers = infos.compactMap { Self.header($0, mailbox: mailbox) }.sorted { $0.date > $1.date }
+            return MailPage(headers: headers, total: order.count)
+        }
+    }
+
+    /// The folder's UIDs, newest arrival first. Sequence numbers can't stand in for this: QQ Mail
+    /// numbers messages out of date order, so the highest numbers can be a batch of years-old mail.
+    private func newestFirst(_ mailbox: String, _ selection: Mailbox.Selection, on server: IMAPServer) async throws -> [UInt32] {
+        let count = selection.messageCount
+        var index = indexes[mailbox] ?? FolderIndex()
+        let known = index.validity == selection.uidValidity && !index.dates.isEmpty
+        if count == 0 {
+            index.dates = [:]
+        } else if known, index.uidNext != nil, index.uidNext == selection.uidNext, index.dates.count == count {
+            // Nothing arrived or left since last time.
+        } else if known {
+            // Drop what left, then read dates only for UIDs not seen before.
+            let live: UIDSet = try await server.search(criteria: [.all])
+            let uids = Set(live.toArray().map(\.value))
+            index.dates = index.dates.filter { uids.contains($0.key) }
+            let fresh = uids.subtracting(index.dates.keys).sorted().map { SwiftMail.UID($0) }
+            for start in stride(from: 0, to: fresh.count, by: 2000) {
+                let chunk = Array(fresh[start..<min(fresh.count, start + 2000)])
+                index.dates.merge(try await arrivals(UIDSet(chunk), on: server)) { _, new in new }
+            }
+            if index.dates.count != count { index.dates = try await allArrivals(count, on: server) }
+        } else {
+            index.dates = try await allArrivals(count, on: server)
+        }
+        let changed = index.validity != selection.uidValidity || index.uidNext != selection.uidNext
+            || index.dates.keys != indexes[mailbox]?.dates.keys
+        index.validity = selection.uidValidity
+        index.uidNext = selection.uidNext
+        indexes[mailbox] = index
+        if changed { saveIndexes() }
+        return index.dates.sorted { ($0.value, $0.key) > ($1.value, $1.key) }.map(\.key)
+    }
+
+    private func saveIndexes() {
+        guard let data = try? JSONEncoder().encode(indexes) else { return }
+        let url = Self.indexURL(account.id)
+        Task.detached(priority: .utility) {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// Arrival times of every message, a few thousand per FETCH so each answers within SwiftMail's timeout.
+    private func allArrivals(_ count: Int, on server: IMAPServer) async throws -> [UInt32: Date] {
+        var dates: [UInt32: Date] = [:]
+        for start in stride(from: 1, through: count, by: 2000) {
+            let end = min(count, start + 1999)
+            dates.merge(try await arrivals(SequenceNumberSet(start...end), on: server)) { _, new in new }
+        }
+        return dates
+    }
+
+    private func arrivals<T: MessageIdentifier>(_ set: MessageIdentifierSet<T>, on server: IMAPServer) async throws -> [UInt32: Date] {
+        let infos = try await server.fetchMessageInfosBulk(using: set, options: [.internalDate])
+        var dates: [UInt32: Date] = [:]
+        for info in infos {
+            guard let uid = info.uid else { continue }
+            dates[uid.value] = info.internalDate ?? info.date ?? .distantPast
+        }
+        return dates
+    }
+
+    /// swift-nio-imap reports unparseable server replies as IMAPDecoderError wrapping a ParserError.
+    private static func isParseFailure(_ error: Error) -> Bool {
+        let text = String(reflecting: error)
+        return text.contains("IMAPDecoderError") || text.contains("ParserError")
     }
 
     private static func header(_ info: MessageInfo, mailbox: String) -> MailHeader? {
         guard let uid = info.uid else { return nil }
         let from = info.fromAddresses.mailboxes.first
-        let references = info.additionalHeaderFields?.first { $0.name.lowercased() == "references" }
+        // SwiftMail moves References out of the extra header fields into its own property.
+        let references = info.references?.map { String(describing: $0) }
+            ?? info.additionalHeaderFields?.first { $0.name.lowercased() == "references" }
             .map { String(describing: $0.value) }
             .map { $0.split(whereSeparator: \.isWhitespace).map(String.init) } ?? []
         return MailHeader(

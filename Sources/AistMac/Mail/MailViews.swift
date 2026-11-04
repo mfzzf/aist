@@ -140,6 +140,17 @@ struct MailListColumn: View {
                         }
                     }
             }
+            if model.query.trimmingCharacters(in: .whitespaces).isEmpty, mail.hasMore(account, folder) {
+                // Older mail loads as the end of the list scrolls into view, like Mail.
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity)
+                    .selectionDisabled()
+                    // Re-armed when a refresh that blocked it finishes, not only when rows arrive.
+                    .task(id: [headers.count, mail.loading.contains(mail.key(account, folder)) ? 1 : 0]) {
+                        await mail.loadMore(account, folder: folder)
+                    }
+            }
         }
         .listStyle(.inset)
         .animation(.default, value: headers.map(\.id))

@@ -37,6 +37,14 @@ struct CalEvent: Identifiable, Hashable {
 
     var isCall: Bool { eventID.hasPrefix("call:") }
 
+    /// 腾讯会议 is installed to open wemeet:// links.
+    static var canJoinByCode: Bool {
+        URL(string: "wemeet://page/inmeeting").flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) } != nil
+    }
+
+    /// The join link opens in 腾讯会议 rather than a browser.
+    var joinsInTencentMeeting: Bool { joinURL?.scheme == "wemeet" }
+
     /// Has other people or a call link: a meeting worth recording, not a personal block.
     var isMeeting: Bool {
         if attendees.count > 1 || meetingCode != nil { return true }
@@ -48,6 +56,11 @@ struct CalEvent: Identifiable, Hashable {
     /// The call link, if any (opened by "加入会议").
     var joinURL: URL? {
         if let url, url.scheme?.hasPrefix("http") == true { return url }
+        // 企业微信 schedules carry the meeting number but no link, and 企业微信 has no public URL into
+        // its own meeting window; it joins through wemeet:// itself, which 腾讯会议 handles.
+        if source == .wecom, let code = meetingCode, Self.canJoinByCode {
+            return URL(string: "wemeet://page/inmeeting?meeting_code=\(code.filter(\.isNumber))")
+        }
         let text = [location, notes].compactMap { $0 }.joined(separator: " ")
         let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
         let links = detector?.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap(\.url) ?? []
@@ -207,7 +220,10 @@ final class CalendarCenter: ObservableObject {
     /// Opens the event in Calendar.app.
     func reveal(_ e: CalEvent) {
         if e.source == .wecom {
-            if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.tencent.WeWorkMac") {
+            // Straight to 企业微信's 日程 page (it has no link to a single schedule).
+            if let url = URL(string: "wxwork://calendar"), NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
+                NSWorkspace.shared.open(url)
+            } else if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.tencent.WeWorkMac") {
                 NSWorkspace.shared.openApplication(at: app, configuration: .init())
             }
             return

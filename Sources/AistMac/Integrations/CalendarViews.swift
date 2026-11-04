@@ -222,7 +222,17 @@ struct EventDetail: View {
                     Button { NSWorkspace.shared.open(url) } label: {
                         Label("加入会议", systemImage: "video")
                     }
-                    .help("打开会议链接")
+                    .help(event.joinsInTencentMeeting ? "用腾讯会议按会议号加入" : "打开会议链接")
+                } else if event.source == .wecom, let code = event.meetingCode {
+                    // No 腾讯会议 to join with: the number on the clipboard, 企业微信's 日程 open.
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(code, forType: .string)
+                        calendar.reveal(event)
+                    } label: {
+                        Label("加入会议", systemImage: "video")
+                    }
+                    .help("拷贝会议号并打开企业微信日程")
                 }
                 Button { calendar.reveal(event) } label: {
                     if event.source == .wecom {
@@ -231,7 +241,7 @@ struct EventDetail: View {
                         Label("在日历中打开", systemImage: "calendar")
                     }
                 }
-                .help(event.source == .wecom ? "打开企业微信" : "在「日历」App 中打开")
+                .help(event.source == .wecom ? "打开企业微信的日程页" : "在「日历」App 中打开")
             }
         }
     }
