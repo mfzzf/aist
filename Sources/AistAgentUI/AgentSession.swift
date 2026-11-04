@@ -59,7 +59,7 @@ public final class AgentSession: ObservableObject, Identifiable {
     @Published public var models: [ModelOption] = []
     /// The picked model; nil = the host's default.
     @Published public var selectedModel: ModelOption? {
-        didSet { if let m = selectedModel, m != oldValue { onSelectModel?(m) } }
+        didSet { if let m = selectedModel, m != oldValue, !restoringModel { onSelectModel?(m) } }
     }
     /// Remember the choice for new conversations.
     public var onSelectModel: (@MainActor (ModelOption) -> Void)?
@@ -85,16 +85,24 @@ public final class AgentSession: ObservableObject, Identifiable {
 
     // MARK: - Conversations
 
-    /// Shows a saved conversation. Recently seen ones come from memory in the same frame as the
-    /// click; others load first and then swap in one unanimated step, so the view never passes
-    /// through the empty state. A newer click wins over a slower load.
+    /// Shows a saved conversation. Recently seen ones come from memory, others load first; either
+    /// way the swap happens on the next run-loop turn, never inside the SwiftUI update that
+    /// delivered the click. (Swapping synchronously from an `onChange` made SwiftUI re-enter its
+    /// own layout for every published property and lock up.) A newer click wins over a slower load.
     public func open(_ id: UUID?) {
         guard id != conversationID || id == nil else { return }
         guard let id, let store else { reset(); return }
         openGeneration += 1
-        if let cached = recent[id] { show(cached, id: id); return }
         let generation = openGeneration
-        Task {
+        if let cached = recent[id] {
+            Task { @MainActor [weak self] in
+                guard let self, generation == self.openGeneration else { return }
+                self.show(cached, id: id)
+            }
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             var loaded: [Message] = []
             do { loaded = try await store.messages(of: id) } catch { problem = error.localizedDescription }
             guard generation == openGeneration else { return }
@@ -118,6 +126,13 @@ public final class AgentSession: ObservableObject, Identifiable {
 
     private func show(_ loaded: [Message], id: UUID) {
         stop()
+        // Continue with the model that answered last, if it's still offered.
+        var model = selectedModel
+        if let last = loaded.last(where: { if case .assistant = $0 { true } else { false } }),
+           case let .assistant(a) = last,
+           let option = models.first(where: { $0.provider == a.provider && $0.model == a.model }) {
+            model = option
+        }
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -127,15 +142,15 @@ public final class AgentSession: ObservableObject, Identifiable {
             problem = nil
             conversationID = id
             title = nil
+            restoringModel = true
+            selectedModel = model
+            restoringModel = false
             openSerial += 1
         }
-        // Continue with the model that answered last, if it's still offered.
-        if let last = loaded.last(where: { if case .assistant = $0 { true } else { false } }),
-           case let .assistant(a) = last,
-           let option = models.first(where: { $0.provider == a.provider && $0.model == a.model }) {
-            selectedModel = option
-        }
     }
+
+    /// Set while `show` restores a conversation's model: not a user choice, so not remembered.
+    private var restoringModel = false
 
     private static let recentLimit = 30
     private var recent: [UUID: [Message]] = [:]

@@ -211,31 +211,22 @@ struct MainView: View {
             }
         }
         .searchable(text: $model.query, placement: .toolbar, prompt: model.pane.isChat ? "搜索对话" : "搜索")
+        // These handlers only touch ObservableObjects, and Combine publishes from inside a SwiftUI
+        // update are undefined behaviour (seen: the layout re-entered itself until the app hung).
+        // So every one of them hops to the next run-loop turn first.
         .onChange(of: model.query) { _, q in
-            if model.pane.isChat { agent.library.query = q }
+            Task { @MainActor in if model.pane.isChat { agent.library.query = q } }
         }
         .onChange(of: model.pane) { old, pane in
-            if !pane.isChat, !agent.library.query.isEmpty { agent.library.query = "" }
-            if case let .conversation(id) = pane { agent.library.selection.selected = id }
-            else { agent.library.selection.selected = nil }
-            switch pane {
-            case let .conversation(id):
-                agent.session.open(id)
-            case .chat:
-                // 问答 itself = a new conversation (unless one is still being answered).
-                if agent.session.conversationID != nil, !agent.session.isRunning { agent.session.reset() }
-            default: break
-            }
-            if pane.isChat, !old.isChat {
-                agent.refreshModels()
-                agent.session.prefetch(agent.library.conversations.prefix(20).map(\.id))
-            }
+            Task { @MainActor in paneChanged(from: old, to: pane) }
         }
         // A new conversation gets its id with the first answer: select it in the sidebar.
         .onChange(of: agent.session.conversationID) { _, id in
-            guard model.pane.isChat else { return }
-            let pane: MainModel.Pane = id.map { .conversation($0) } ?? .chat
-            if model.pane != pane { model.pane = pane }
+            Task { @MainActor in
+                guard model.pane.isChat else { return }
+                let pane: MainModel.Pane = id.map { .conversation($0) } ?? .chat
+                if model.pane != pane { model.pane = pane }
+            }
         }
         .navigationTitle(title)
         .alert("新建待办", isPresented: $adding) {
@@ -260,6 +251,24 @@ struct MainView: View {
             AddAccountView(mail: mail) { id in
                 model.pane = .mail(id, mail.inbox(of: id))
             }
+        }
+    }
+
+    private func paneChanged(from old: MainModel.Pane, to pane: MainModel.Pane) {
+        if !pane.isChat, !agent.library.query.isEmpty { agent.library.query = "" }
+        if case let .conversation(id) = pane { agent.library.selection.selected = id }
+        else { agent.library.selection.selected = nil }
+        switch pane {
+        case let .conversation(id):
+            agent.session.open(id)
+        case .chat:
+            // 问答 itself = a new conversation (unless one is still being answered).
+            if agent.session.conversationID != nil, !agent.session.isRunning { agent.session.reset() }
+        default: break
+        }
+        if pane.isChat, !old.isChat {
+            agent.refreshModels()
+            agent.session.prefetch(agent.library.conversations.prefix(20).map(\.id))
         }
     }
 

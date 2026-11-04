@@ -40,6 +40,25 @@ struct MarkdownBlockView: View, Equatable {
     let compact: Bool
     /// False for the block still streaming in: its every prefix would only fill the cache.
     let cache: Bool
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.block == b.block && a.compact == b.compact && a.cache == b.cache
+    }
+
+    var body: some View {
+        // Only blocks with web links watch the icon store; the rest must not re-layout as icons arrive.
+        if block.mayHaveLinks {
+            LinkedBlockView(block: block, compact: compact, cache: cache)
+        } else {
+            BlockBody(block: block, compact: compact, cache: cache, icons: nil)
+        }
+    }
+}
+
+private struct LinkedBlockView: View {
+    let block: MarkdownBlocks.Block
+    let compact: Bool
+    let cache: Bool
     @ObservedObject private var icons = FaviconStore.shared
 
     init(block: MarkdownBlocks.Block, compact: Bool, cache: Bool) {
@@ -48,9 +67,14 @@ struct MarkdownBlockView: View, Equatable {
         self.cache = cache
     }
 
-    static func == (a: Self, b: Self) -> Bool {
-        a.block == b.block && a.compact == b.compact && a.cache == b.cache
-    }
+    var body: some View { BlockBody(block: block, compact: compact, cache: cache, icons: icons) }
+}
+
+private struct BlockBody: View {
+    let block: MarkdownBlocks.Block
+    let compact: Bool
+    let cache: Bool
+    let icons: FaviconStore?
 
     var body: some View { view(block) }
     @ViewBuilder private func view(_ block: MarkdownBlocks.Block) -> some View {
@@ -99,7 +123,7 @@ struct MarkdownBlockView: View, Equatable {
             let piece = Text(AttributedString(attr[run.range]))
             if let link = run.link, link != previous, let host = link.host, link.scheme?.hasPrefix("http") == true {
                 let key = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
-                if let icon = icons.image(for: key) {
+                if let icon = icons?.image(for: key) {
                     #if os(macOS)
                     let image = Text(Image(nsImage: icon)).baselineOffset(-2)
                     #else
@@ -259,6 +283,15 @@ enum MarkdownBlocks {
         case code(String, String)
         case table([String], [[String]])
         case rule
+
+        /// Cheap test for inline web links (a false positive only costs an observer).
+        var mayHaveLinks: Bool {
+            switch self {
+            case let .heading(_, s), let .paragraph(s), let .quote(s): return s.contains("http")
+            case let .list(items): return items.contains { $0.text.contains("http") }
+            case .code, .table, .rule: return false
+            }
+        }
     }
 
     static func parse(_ text: String) -> [Block] {

@@ -64,6 +64,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "todos": mainWindow.show(.todos)
         default: break
         }
+        // -aistCycle <seconds>: switch between the first saved conversations on that interval and
+        // log every main-thread stall over 50 ms to /tmp/aist-cycle.log (for profiling with `sample`).
+        if let every = (args["aistCycle"] as? String).flatMap(Double.init) {
+            let log = FileHandle(forWritingAtPath: "/tmp/aist-cycle.log") ?? {
+                FileManager.default.createFile(atPath: "/tmp/aist-cycle.log", contents: nil)
+                return FileHandle(forWritingAtPath: "/tmp/aist-cycle.log")!
+            }()
+            log.seekToEndOfFile()
+            func note(_ s: String) { log.write("\(Date().formatted(date: .omitted, time: .standard)) \(s)\n".data(using: .utf8)!) }
+            var last = CFAbsoluteTimeGetCurrent()
+            let stall = Timer(timeInterval: 0.016, repeats: true) { _ in
+                let now = CFAbsoluteTimeGetCurrent()
+                if now - last > 0.05 { note(String(format: "stall %.0f ms", (now - last) * 1000)) }
+                last = now
+            }
+            RunLoop.main.add(stall, forMode: .common)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard let self else { return }
+                let ids = self.agent.library.conversations.prefix(8).map(\.id)
+                note("cycling \(ids.count) conversations every \(every)s")
+                for n in 0..<40 {
+                    guard !ids.isEmpty else { break }
+                    let id = ids[n % ids.count]
+                    let t = CFAbsoluteTimeGetCurrent()
+                    self.mainWindow.show(.conversation(id))
+                    note(String(format: "switch #%d -> %@ set in %.1f ms", n, id.uuidString.prefix(8) as CVarArg, (CFAbsoluteTimeGetCurrent() - t) * 1000))
+                    try? await Task.sleep(for: .seconds(every))
+                }
+                note("done")
+            }
+        }
         // -aistSnapshot <path.png>: write the window to a file every 3 s (each shot to <path>-<n>.png).
         if let path = args["aistSnapshot"] as? String {
             Task { @MainActor [weak self] in
