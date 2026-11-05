@@ -192,6 +192,7 @@ private struct UpdateSection: View {
 private struct GeneralSettings: View {
     @ObservedObject var cloud: CloudSync
     @AppStorage(UserIdentity.namesKey) private var myNames = ""
+    @AppStorage(UserIdentity.backgroundKey) private var myBackground = ""
     @State private var hotkey = HotkeyManager.shared.current
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var screenOK = ScreenCapturer.hasPermission
@@ -215,6 +216,16 @@ private struct GeneralSettings: View {
                 } label: {
                     Text("你的名字")
                     Text("AI 据此认出别人在 @ 你")
+                }
+                LabeledContent {
+                    TextField("工作背景", text: $myBackground,
+                              prompt: Text("我负责 Nimbus 客户端和模型接入\n老板：Kevin；主要客户：Acme\n报销、行政的事不归我"), axis: .vertical)
+                        .labelsHidden()
+                        .lineLimit(3 ... 8)
+                        .frame(width: 260)
+                } label: {
+                    Text("工作背景")
+                    Text("你负责的产品、项目、客户。这些事没人点名时，AI 也会主动记给你")
                 }
                 Toggle("在程序坞中显示", isOn: Binding(
                     get: { UserDefaults.standard.bool(forKey: AppDelegate.showInDockKey) },
@@ -659,6 +670,10 @@ struct ProviderDetail: View {
     }
 
     @State private var key = ""
+    /// Result of the last key edit: nil until the user edits it, then saved or not.
+    @State private var keySaved: Bool?
+    /// Bumped on every key edit; a pause in typing then tests the new key.
+    @State private var keyEdits = 0
     @State private var models: [LLMModelInfo] = []
     @State private var loadingModels = false
     @State private var test: TestState = .idle
@@ -732,15 +747,27 @@ struct ProviderDetail: View {
                         VStack(alignment: .trailing, spacing: 4) {
                             SecureField("API 密钥", text: $key, prompt: Text("粘贴 API 密钥"))
                                 .labelsHidden()
-                                .onSubmit { provider.setAPIKey(key) }
-                                .onChange(of: key) { _, new in provider.setAPIKey(new) }
+                                .onSubmit { keySaved = provider.setAPIKey(key) }
+                                .onChange(of: key) { _, new in
+                                    // Also fires when onAppear loads the stored key: not an edit.
+                                    guard new.trimmingCharacters(in: .whitespacesAndNewlines) != (provider.apiKey ?? "") else { return }
+                                    keySaved = provider.setAPIKey(new)
+                                    keyEdits += 1
+                                }
                             if let url = provider.keyURL.flatMap(URL.init(string:)) {
                                 Link("获取密钥…", destination: url).font(.caption)
                             }
                         }
                     } label: {
                         Text("API 密钥")
-                        Text("只保存在钥匙串")
+                        switch keySaved {
+                        case true? where !key.isEmpty:
+                            Label("已保存到钥匙串", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        case false?:
+                            Label("没能写入钥匙串，请重试", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                        default:
+                            Text("只保存在钥匙串")
+                        }
                     }
                 }
                 LabeledContent {
@@ -789,7 +816,10 @@ struct ProviderDetail: View {
                     case .idle: EmptyView()
                     case .running: ProgressView().controlSize(.small)
                     case let .ok(ms):
-                        Label("连接成功 · \(ms)", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        Label(isActive ? "连接成功 · \(ms)" : "连接成功 · \(ms)，点「设为默认」后截屏和问答才会用它",
+                              systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .fixedSize(horizontal: false, vertical: true)
                     case let .failed(msg):
                         Label(msg, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
@@ -831,6 +861,16 @@ struct ProviderDetail: View {
         .formStyle(.grouped)
         .onAppear { key = provider.apiKey ?? "" }
         .onChange(of: provider.model) { if case .failed = test { test = .idle } }
+        // Typing paused on a new key: check it right away, so a bad paste shows up here, not at the next screenshot.
+        .task(id: keyEdits) {
+            guard keyEdits > 0, keySaved == true, !key.isEmpty, !provider.model.isEmpty else {
+                if key.isEmpty { test = .idle }
+                return
+            }
+            try? await Task.sleep(for: .seconds(0.8))
+            guard !Task.isCancelled else { return }
+            await runTest()
+        }
         .task {
             if !provider.needsKey || !key.isEmpty { await loadModels(quiet: true) }
             // -aistShotPicker <query>: open the model list with that search (for screenshots).

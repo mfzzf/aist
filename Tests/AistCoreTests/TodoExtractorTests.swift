@@ -109,6 +109,29 @@ import Testing
     #expect(try TodoExtractor.parse(#"{"analysis": "纯通知", "todos": []}"#).isEmpty)
 }
 
+@Test func emptyResultKeepsTheModelsReason() throws {
+    let raw = #"{"analysis": "两位同事在讨论排期", "no_todo_reason": "是别人之间的讨论，没有交代给你", "todos": []}"#
+    let out = try TodoExtractor.parseExtraction(raw)
+    #expect(out.todos.isEmpty)
+    #expect(out.noTodoReason == "是别人之间的讨论，没有交代给你")
+    #expect(out.analysis == "两位同事在讨论排期")
+    // Older shapes still parse, just without a reason.
+    #expect(try TodoExtractor.parseExtraction("[]").noTodoReason == nil)
+    #expect(try TodoExtractor.parseExtraction(#"{"analysis": "纯通知", "no_todo_reason": "  ", "todos": []}"#).noTodoReason == nil)
+}
+
+@Test func promptCarriesWorkBackground() {
+    let bg = "我负责 Nimbus 客户端\n报销的事不归我"
+    let p = TodoPrompt.extraction(.screenshot, identity: ["张三"], background: bg, now: .now, timeZone: .current)
+    #expect(p.contains("## 用户的工作背景"))
+    #expect(p.contains("  我负责 Nimbus 客户端\n  报销的事不归我"))
+    #expect(p.contains("no_todo_reason"))
+    // Blank background adds nothing.
+    #expect(!TodoPrompt.extraction(.screenshot, identity: ["张三"], background: "  \n", now: .now, timeZone: .current).contains("## 用户的工作背景"))
+    #expect(TodoPrompt.shared(identity: [], background: bg, now: .now, timeZone: .current).contains("Nimbus"))
+    #expect(TodoPrompt.noteAssistant(identity: [], background: bg, now: .now, timeZone: .current).contains("Nimbus"))
+}
+
 @Test func promptCarriesIdentityAndSourceNotes() {
     let p = TodoPrompt.extraction(.screenshot, identity: ["张三", "alex.zhang"], now: .now, timeZone: .current)
     #expect(p.contains("张三、alex.zhang"))

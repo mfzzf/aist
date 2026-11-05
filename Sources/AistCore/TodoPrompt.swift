@@ -16,11 +16,13 @@ public enum TodoPrompt {
         case note
     }
 
-    /// System prompt for screenshot / email extraction.
-    public static func extraction(_ source: Source, identity: [String], now: Date, timeZone: TimeZone) -> String {
+    /// System prompt for screenshot / email extraction. `background` is the user's own description of
+    /// their work (products, projects, customers, boss); see `who`.
+    public static func extraction(_ source: Source, identity: [String], background: String = "",
+                                  now: Date, timeZone: TimeZone) -> String {
         [
             role(source),
-            who(identity),
+            who(identity, background: background),
             judgment,
             writing,
             initiative,
@@ -32,8 +34,9 @@ public enum TodoPrompt {
     }
 
     /// The judgment, writing and time sections, for prompts with their own output (meeting minutes).
-    public static func shared(identity: [String], now: Date, timeZone: TimeZone) -> String {
-        [who(identity), judgment, writing, initiative, time(now: now, timeZone: timeZone)].joined(separator: "\n\n")
+    public static func shared(identity: [String], background: String = "", now: Date, timeZone: TimeZone) -> String {
+        [who(identity, background: background), judgment, writing, initiative, time(now: now, timeZone: timeZone)]
+            .joined(separator: "\n\n")
     }
 
     // MARK: - Sections
@@ -52,22 +55,41 @@ public enum TodoPrompt {
         """
     }
 
-    static func who(_ identity: [String]) -> String {
+    static func who(_ identity: [String], background: String = "") -> String {
         let names = identity.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        guard !names.isEmpty else {
-            return "## 用户是谁\n输入里用「你」对用户说话、或 @ 用户时，指的都是用户本人。"
-        }
+        let whoAmI = names.isEmpty
+            ? "## 用户是谁\n输入里用「你」对用户说话、或 @ 用户时，指的都是用户本人。"
+            : """
+            ## 用户是谁
+            用户本人的名字/账号：\(names.joined(separator: "、"))。
+            别人提到、@ 这些名字，或用「你」对用户说话时，指的都是用户。@ 或点名的是别人时，那件事是别人的。
+            """
+        guard let work = self.background(background) else { return whoAmI }
+        return whoAmI + "\n\n" + work
+    }
+
+    /// The user's own account of their work, and how to use it. Names of products, projects and customers
+    /// are what lets the model tell "this is mine" when nobody is @-ed, and fix the transcript's spelling of them.
+    static func background(_ text: String) -> String? {
+        let work = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !work.isEmpty else { return nil }
+        let lines = work.split(separator: "\n").map { "  " + $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
         return """
-        ## 用户是谁
-        用户本人的名字/账号：\(names.joined(separator: "、"))。
-        别人提到、@ 这些名字，或用「你」对用户说话时，指的都是用户。@ 或点名的是别人时，那件事是别人的。
+        ## 用户的工作背景
+        用户自己写的，用来判断一件事和用户有没有关系：
+        \(lines)
+        怎么用：
+        - 这里写明由用户负责的产品、项目、客户、系统、流程：它们出了问题、有人提需求、有人问进度、要提审/发版/交付，而原文里没有点名别人负责时，默认是用户要跟进的事——主动记下来，并在 suggestion 里说明是根据哪条背景判断的（如「你负责 Nimbus 客户端，这个崩溃应该是你跟」）。点名给别人的仍然是别人的。
+        - 这里写的老板、客户、重点合作方提出的事，优先级至少 medium；在催的记 high。
+        - 这里的人名、产品名、术语是正确写法，用来认出原文和转写里的错字、缩写、别名。
+        - 用户写了「不归我管」「不用记」的类别，照办，不要记。
         """
     }
 
     static let judgment = """
         ## 怎么判断一件事算不算待办
         对每件可能的事，依次回答四个问题，四个都是「是」才记：
-        1. 落在用户身上吗？算：别人请求/指派给用户的；用户自己答应或主动说要做的；需要用户出席的会议、活动。不算：别人自己要做的事；点名给其他人的事；泛泛的讨论和想法；已经有别人认领的事。
+        1. 落在用户身上吗？算：别人请求/指派给用户的；用户自己答应或主动说要做的；需要用户出席的会议、活动；「用户的工作背景」里写明由用户负责的东西上出的问题、来的需求（没有点名别人时）。不算：别人自己要做的事；点名给其他人的事；泛泛的讨论和想法；已经有别人认领的事。
         2. 还没了结吗？按时间顺序读到最后，以最新状态为准。别人的问题用户已经答了、事情已经做完/发出、已取消、后面改了主意，都算了结。
         3. 需要用户动手吗？纯通知、FYI、广告、营销、自动报表、闲聊、感谢、寒暄都不算。用户只需要「知道」、不需要「做」的，不算。
            例外——自动通知在报告「用户负责的东西坏了/卡住了/快到期了」时，是待办：用户仓库的 CI/构建/测试失败、部署失败、需要升级依赖的安全告警、付款失败、证书/域名/账号即将过期、配额用尽、服务宕机告警（且没写「已自动恢复/已自动处理」）。
@@ -88,6 +110,7 @@ public enum TodoPrompt {
           medium = 本周内要做；功能分支、预发环境的问题；普通请求。
           low = 没有时间压力、可做可不做的。
         - 合并同类：同一个工作流/同一个问题的多次通知是一件事——和「已有待办」相同就用 duplicate_of 指向它，title 写成稳定的说法（如「修复 desktop-app 的 Windows 打包 CI」），不要每次失败都新建一条。
+        - 认领自己的事：有「用户的工作背景」时，按它判断没点名的事归不归用户（见上）；没有背景、也没人点名的，仍然不算。
         - 写 suggestion：1～2 句具体、可执行的下一步建议，用你从原文里读出来的信息——先看哪里、可能的原因、找谁、需要准备什么。例：「只有 Package Windows x64 失败，macOS/Linux 都通过，先看它的 annotation；昨天 324f8f9 也挂在同一步，像是持续性问题而不是偶发。」没有比 title 更多的信息就写 null，不要写「请及时处理」这类空话。
         """
 
@@ -219,8 +242,8 @@ public enum TodoPrompt {
 
     static let output = """
         ## 提交结果
-        调用 record_todos 工具提交结果：先在 analysis 里用 1～4 句写清输入是什么、谁对谁说了什么、哪些事已了结、哪些落在用户身上，再填 todos。没有待办时 todos 为 []。
-        如果无法调用工具，就只输出同样结构的 JSON 对象：{"analysis": "...", "todos": [...]}，不要任何其他文字。
+        调用 record_todos 工具提交结果：先在 analysis 里用 1～4 句写清输入是什么、谁对谁说了什么、哪些事已了结、哪些落在用户身上，再填 todos。没有待办时 todos 为 []，并在 no_todo_reason 里用一句话（不超过 30 字）告诉用户为什么这里没有待办，比如「是别人之间的讨论，没有交代给你」「问题已经答过了」「待跟进项还没落到具体人」；有待办时 no_todo_reason 为 null。
+        如果无法调用工具，就只输出同样结构的 JSON 对象：{"analysis": "...", "no_todo_reason": null, "todos": [...]}，不要任何其他文字。
         """
 
     // MARK: - Tool schemas
@@ -245,11 +268,12 @@ public enum TodoPrompt {
 
     public static let recordTodos = LLMClient.Tool(
         name: "record_todos",
-        description: "提交从输入中找到的、用户本人需要去做的待办。先写 analysis 再列 todos；没有待办时 todos 为空数组。",
+        description: "提交从输入中找到的、用户本人需要去做的待办。先写 analysis 再列 todos；没有待办时 todos 为空数组，并在 no_todo_reason 里说明原因。",
         schema: """
-            {"type": "object", "additionalProperties": false, "required": ["analysis", "todos"],
+            {"type": "object", "additionalProperties": false, "required": ["analysis", "no_todo_reason", "todos"],
              "properties": {
                "analysis": {"type": "string", "description": "1～4 句：输入是什么、谁对谁说了什么、哪些事已了结、哪些落在用户身上"},
+               "no_todo_reason": {"type": ["string", "null"], "description": "todos 为空时，一句话（不超过 30 字）告诉用户为什么没有待办；有待办时为 null"},
                "todos": {"type": "array", "items": \(todoItemSchema)}
              }}
             """

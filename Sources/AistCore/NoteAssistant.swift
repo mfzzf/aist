@@ -105,10 +105,13 @@ public struct NoteAssistant: Sendable {
 
     public let client: LLMClient
     public var identity: [String]
+    /// The user's own description of their work (see `TodoPrompt.background`).
+    public var background: String
 
-    public init(client: LLMClient, identity: [String] = []) {
+    public init(client: LLMClient, identity: [String] = [], background: String = "") {
         self.client = client
         self.identity = identity
+        self.background = background
     }
 
     /// - Parameters:
@@ -131,7 +134,8 @@ public struct NoteAssistant: Sendable {
         text += said.isEmpty ? "（没有写字，只发了图片）" : String(said.prefix(12_000))
         let parts = images.map { LLMClient.Part.image($0, mediaType: "image/jpeg") } + [.text(text)]
         let result = try await client.callTool(
-            system: TodoPrompt.noteAssistant(identity: identity, now: now, timeZone: timeZone, withImages: !images.isEmpty),
+            system: TodoPrompt.noteAssistant(identity: identity, background: background, now: now, timeZone: timeZone,
+                                             withImages: !images.isEmpty),
             parts: parts,
             tool: TodoPrompt.handleNote
         )
@@ -256,10 +260,11 @@ public struct NoteAssistant: Sendable {
 extension TodoPrompt {
     /// System prompt for the phone's input bar. Unlike the extraction prompts, the user is talking *to*
     /// Aist: the first job is to tell what they want done, the second is to find which to-do they mean.
-    public static func noteAssistant(identity: [String], now: Date, timeZone: TimeZone, withImages: Bool = false) -> String {
+    public static func noteAssistant(identity: [String], background: String = "", now: Date, timeZone: TimeZone,
+                                     withImages: Bool = false) -> String {
         [
             noteRole,
-            who(identity),
+            who(identity, background: background),
             noteIntents,
             noteWriting,
             clock(now: now, timeZone: timeZone),

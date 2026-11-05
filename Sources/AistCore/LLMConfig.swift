@@ -72,13 +72,14 @@ public struct LLMConfig: Codable, Sendable {
         if let data = try? Data(contentsOf: fileURL),
            let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], raw["llm"] != nil,
            let active = LLMProviderStore.load().current {
-            // Providers set up in Settings › AI.
-            config = active.config
-            config.thinking = raw["thinking"] as? Bool
-            if let env = ProcessInfo.processInfo.environment["AIST_API_KEY"], !env.isEmpty { config.apiKey = env }
-            guard let key = config.apiKey, !key.isEmpty else { throw ConfigError.missingKey(active.name) }
-            guard !config.model.isEmpty else { throw ConfigError.missingModel(active.name) }
-            return config
+            return try providerConfig(active, thinking: raw["thinking"] as? Bool)
+        }
+        // A fresh install has no "llm" section until a provider is edited, but its key (saved per
+        // provider in Settings › AI) is already in the Keychain. Only old single-key setups, whose file
+        // carries model/baseURL at the top level, take the legacy path below.
+        let raw = (try? Data(contentsOf: fileURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        if raw?["model"] == nil, raw?["baseURL"] == nil, let active = LLMProviderStore.load().current {
+            return try providerConfig(active, thinking: raw?["thinking"] as? Bool)
         }
         if let data = try? Data(contentsOf: fileURL) {
             config = try JSONDecoder().decode(LLMConfig.self, from: data)
@@ -89,6 +90,15 @@ public struct LLMConfig: Codable, Sendable {
             config.apiKey = stored
         }
         guard let key = config.apiKey, !key.isEmpty else { throw ConfigError.missingKey("DeepSeek") }
+        return config
+    }
+
+    private static func providerConfig(_ active: LLMProvider, thinking: Bool?) throws -> LLMConfig {
+        var config = active.config
+        config.thinking = thinking
+        if let env = ProcessInfo.processInfo.environment["AIST_API_KEY"], !env.isEmpty { config.apiKey = env }
+        guard let key = config.apiKey, !key.isEmpty else { throw ConfigError.missingKey(active.name) }
+        guard !config.model.isEmpty else { throw ConfigError.missingModel(active.name) }
         return config
     }
 

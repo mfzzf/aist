@@ -1,15 +1,21 @@
 import AppKit
+import CoreImage.CIFilterBuiltins
 import SwiftUI
 
-/// 企业微信, through the official `wecom-cli`. Authorizing is a QR scan: aist runs
-/// `wecom-cli auth init --noninteractive --output-qrcode …` and shows the code in a sheet.
+/// 企业微信, through the official `wecom-cli`. Authorizing is a QR scan. Aist runs the scan itself
+/// (the same work.weixin.qq.com endpoints `wecom-cli auth init` uses) and hands the bot it yields to
+/// `wecom-cli auth init --bot-id … --secret …`, retrying: the bot the scan creates takes a while to
+/// become valid, and the CLI's own scan gives up on the first "invalid bot_id or secret".
 @MainActor
 final class WeComCenter: ObservableObject {
     enum Status: Equatable { case checking, notInstalled, installing, unauthorized, authorized }
     enum Scan: Equatable {
         case idle
         case fetching
-        case waiting(qr: NSImage?, link: URL?)
+        /// `scanned`: the phone has scanned and is on the confirm screen.
+        case waiting(qr: NSImage?, link: URL?, scanned: Bool)
+        /// Scan confirmed; trading the bot for a token, `attempt` of `WeComCenter.finishDelays.count + 1`.
+        case finishing(attempt: Int)
         case failed(String)
     }
 
@@ -23,9 +29,9 @@ final class WeComCenter: ObservableObject {
     @Published private(set) var refreshing = false
     @Published private(set) var lastRefresh: Date?
 
-    private var process: Process?
-    private var qrFile: URL?
-    private var log = ""
+    private var scanTask: Task<Void, Never>?
+    /// The bot from a confirmed scan whose authorization hasn't gone through yet: 重试授权 reuses it.
+    @Published private(set) var pendingBot: (id: String, secret: String)?
     private var timer: Timer?
 
     init() {
@@ -247,87 +253,145 @@ final class WeComCenter: ObservableObject {
 
     // MARK: QR sign-in
 
+    private static let qrBase = "https://work.weixin.qq.com/ai/qc"
+    private static let qrSource = "wecom_cli_external"
+    /// Pauses between authorization attempts after a scan: about two minutes in all.
+    static let finishDelays: [Double] = [2, 3, 5, 5, 8, 10, 10, 15, 15, 15, 15, 15]
+
     func startScan() {
-        guard let path = Self.cliPath else {
+        guard Self.cliPath != nil else {
             status = .notInstalled
             return
         }
         cancelScan()
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("aist-wecom-\(UUID().uuidString).png")
-        qrFile = file
+        pendingBot = nil
         scan = .fetching
-
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["auth", "init", "--noninteractive", "--no-browser", "--output-qrcode", file.path]
-        p.environment = Self.environment
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = out
-        p.standardInput = FileHandle.nullDevice
-
-        log = ""
-        out.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let chunk = String(decoding: handle.availableData, as: UTF8.self)
-            guard !chunk.isEmpty else { return }
-            Task { @MainActor in
-                guard let self else { return }
-                self.log += chunk
-                self.parse(self.log)
-            }
-        }
-        p.terminationHandler = { [weak self] proc in
-            let code = proc.terminationStatus
-            let reason = proc.terminationReason
-            Task { @MainActor in
-                out.fileHandleForReading.readabilityHandler = nil
-                guard let self else { return }
-                await self.finished(code: code, killed: reason == .uncaughtSignal, log: self.log)
-            }
-        }
-        do {
-            try p.run()
-            process = p
-        } catch {
-            scan = .failed("没能运行 wecom-cli：\(error.localizedDescription)")
-        }
+        scanTask = Task { await runScan() }
     }
 
-    /// Picks up the link and the PNG as soon as the CLI prints them.
-    private func parse(_ log: String) {
-        guard process != nil else { return }
-        let link = log.split(whereSeparator: \.isWhitespace)
-            .first { $0.hasPrefix("https://work.weixin.qq.com/") }
-            .flatMap { URL(string: String($0)) }
-        var qr: NSImage?
-        if let qrFile, log.contains("二维码已保存") || FileManager.default.fileExists(atPath: qrFile.path) {
-            qr = NSImage(contentsOf: qrFile)
-        }
-        if link != nil || qr != nil {
-            let next = Scan.waiting(qr: qr, link: link)
-            if next != scan { scan = next }
-        }
-    }
-
-    private func finished(code: Int32, killed: Bool, log: String) async {
-        process = nil
-        if let qrFile { try? FileManager.default.removeItem(at: qrFile) }
-        if killed { return } // cancelled
-        await check()
-        if status == .authorized {
-            scan = .idle
-            connecting = false
-        } else {
-            let lines = log.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty && !$0.contains("█") && !$0.contains("▀") && !$0.contains("▄") }
-            scan = .failed(lines.last.map { "授权没有完成：\($0)" } ?? "授权没有完成（退出码 \(code)）")
-        }
+    /// 重试授权 after a confirmed scan: no new scan needed.
+    func retryFinish() {
+        guard let bot = pendingBot else { return startScan() }
+        cancelScan()
+        scanTask = Task { await finish(bot) }
     }
 
     func cancelScan() {
-        process?.terminate()
-        process = nil
+        scanTask?.cancel()
+        scanTask = nil
         if case .failed = scan { } else { scan = .idle }
+    }
+
+    private func runScan() async {
+        let session = URLSession(configuration: .ephemeral)
+        let code: String, authURL: String
+        do {
+            let rsp = try await Self.getJSON(session, "\(Self.qrBase)/generate?source=\(Self.qrSource)&plat=1")
+            guard let data = rsp["data"] as? [String: Any], let s = data["scode"] as? String,
+                  let a = data["auth_url"] as? String else { throw WeComError.failed("二维码接口返回异常") }
+            (code, authURL) = (s, a)
+        } catch {
+            if !Task.isCancelled { scan = .failed("没能获取二维码：\(error.localizedDescription)") }
+            return
+        }
+        let qr = Self.qrImage(authURL)
+        let page = URL(string: "\(Self.qrBase)/gen?source=\(Self.qrSource)&scode=\(code)")
+        scan = .waiting(qr: qr, link: page, scanned: false)
+
+        // The server keeps a code for 5 minutes (wecom-cli's own limit).
+        let deadline = Date.now.addingTimeInterval(300)
+        while Date.now < deadline {
+            try? await Task.sleep(for: .seconds(2))
+            if Task.isCancelled { return }
+            // A failed poll (network blip) just waits for the next one.
+            guard let rsp = try? await Self.getJSON(session, "\(Self.qrBase)/query_result?scode=\(code)"),
+                  let data = rsp["data"] as? [String: Any] else { continue }
+            let state = data["status"] as? String ?? "init"
+            if state == "success" {
+                let info = data["bot_info"] as? [String: Any]
+                guard let id = info?["botid"] as? String, let secret = info?["secret"] as? String else {
+                    scan = .failed("扫码成功，但企业微信没有返回机器人信息，请重新扫码")
+                    return
+                }
+                pendingBot = (id, secret)
+                await finish((id, secret))
+                return
+            }
+            if state != "init", case .waiting(_, _, false) = scan {
+                scan = .waiting(qr: qr, link: page, scanned: true)
+            }
+        }
+        if !Task.isCancelled { scan = .failed("二维码已过期") }
+    }
+
+    /// Hands the scanned bot to wecom-cli until it accepts it. Right after the scan the server usually
+    /// answers "invalid bot_id or secret" for a while; that's waiting, not failure.
+    private func finish(_ bot: (id: String, secret: String)) async {
+        guard let path = Self.cliPath else { status = .notInstalled; return }
+        var lastError = ""
+        for attempt in 0...Self.finishDelays.count {
+            scan = .finishing(attempt: attempt + 1)
+            let output = await Task.detached { () -> String in
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: path)
+                p.arguments = ["auth", "init", "--bot-id", bot.id, "--secret", bot.secret]
+                p.environment = Self.environment
+                let out = Pipe()
+                p.standardOutput = out
+                p.standardError = out
+                p.standardInput = FileHandle.nullDevice
+                guard (try? p.run()) != nil else { return "没能运行 wecom-cli" }
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                return String(decoding: data, as: UTF8.self)
+            }.value
+            if Task.isCancelled { return }
+            await check()
+            if status == .authorized {
+                pendingBot = nil
+                scan = .idle
+                connecting = false
+                return
+            }
+            lastError = Self.cliError(output)
+            guard attempt < Self.finishDelays.count else { break }
+            try? await Task.sleep(for: .seconds(Self.finishDelays[attempt]))
+            if Task.isCancelled { return }
+        }
+        scan = .failed("扫码成功，但企业微信还没有完成授权（\(lastError)）")
+    }
+
+    /// The CLI's errmsg (JSON on stdout), else its last meaningful line.
+    private static func cliError(_ output: String) -> String {
+        if let start = output.firstIndex(of: "{"),
+           let object = try? JSONSerialization.jsonObject(with: Data(output[start...].utf8)) as? [String: Any],
+           let message = object["errmsg"] as? String {
+            return message.components(separatedBy: ", hint").first ?? message
+        }
+        let lines = output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0.rangeOfCharacter(from: .letters) != nil }
+        return lines.last ?? "没有返回信息"
+    }
+
+    private nonisolated static func getJSON(_ session: URLSession, _ url: String) async throws -> [String: Any] {
+        var request = URLRequest(url: URL(string: url)!)
+        request.timeoutInterval = 15
+        let (data, _) = try await session.data(for: request)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw URLError(.cannotParseResponse)
+        }
+        return object
+    }
+
+    private static func qrImage(_ text: String) -> NSImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(text.utf8)
+        filter.correctionLevel = "M"
+        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 10, y: 10)) else { return nil }
+        let rep = NSCIImageRep(ciImage: output)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        return image
     }
 }
 
@@ -414,7 +478,8 @@ struct ConnectWeComView: View {
             if wecom.status == .notInstalled { await wecom.install() }
             else if wecom.status == .unauthorized { wecom.startScan() }
         }
-        .onDisappear { wecom.cancelScan() }
+        // Closing the sheet mid-authorization (the scan already went through) lets it finish in the background.
+        .onDisappear { if case .finishing = wecom.scan { } else { wecom.cancelScan() } }
     }
 
     @ViewBuilder private var content: some View {
@@ -443,7 +508,7 @@ struct ConnectWeComView: View {
             .frame(width: 220, height: 220)
             .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.quinary))
             steps
-        case let .waiting(qr, link):
+        case let .waiting(qr, link, scanned):
             VStack(spacing: 10) {
                 Group {
                     if let qr {
@@ -462,7 +527,7 @@ struct ConnectWeComView: View {
 
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("等待扫码…").foregroundStyle(.secondary)
+                    Text(scanned ? "已扫码，请在手机上确认授权…" : "等待扫码…").foregroundStyle(.secondary)
                 }
                 .font(.callout)
                 if let link {
@@ -470,13 +535,38 @@ struct ConnectWeComView: View {
                 }
             }
             steps
+        case let .finishing(attempt):
+            VStack(spacing: 12) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.green)
+                Text("扫码成功，正在完成授权…").font(.headline)
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(attempt <= 1 ? "正在连接企业微信" : "企业微信正在开通，通常需要几十秒（第 \(attempt) 次尝试）")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.callout)
+                Text("请保持这个窗口打开，完成后会自动关闭。")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 220)
         case let .failed(message):
             VStack(spacing: 12) {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .symbolRenderingMode(.multicolor)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("重新获取二维码") { wecom.startScan() }
-                    .buttonStyle(.borderedProminent)
+                if wecom.pendingBot != nil {
+                    // The scan already went through: retry with the same bot, no new scan.
+                    Button("重试授权") { wecom.retryFinish() }
+                        .buttonStyle(.borderedProminent)
+                    Button("重新扫码") { wecom.startScan() }
+                        .buttonStyle(.link)
+                } else {
+                    Button("重新获取二维码") { wecom.startScan() }
+                        .buttonStyle(.borderedProminent)
+                }
             }
             .frame(minHeight: 120)
         }
@@ -486,7 +576,7 @@ struct ConnectWeComView: View {
         VStack(alignment: .leading, spacing: 6) {
             step(1, "打开手机上的企业微信")
             step(2, "点右上角「＋」›「扫一扫」，扫描上面的二维码")
-            step(3, "在手机上确认授权，这里会自动完成")
+            step(3, "在手机上确认授权（之前建过机器人的，选那个已有的即可，不必新建），这里会自动完成")
         }
         .font(.callout)
         .frame(maxWidth: .infinity, alignment: .leading)

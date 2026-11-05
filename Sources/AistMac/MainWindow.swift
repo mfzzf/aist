@@ -1215,6 +1215,7 @@ private struct MeetingDetail: View {
     @State private var notes = ""
     @State private var loaded = false
     @State private var confirmDelete = false
+    @State private var copied = false
     @State private var showTranscript = false
     /// A transcript line to bring into view (from a key point's / to-do's time).
     @State private var jumpTarget: Int?
@@ -1453,12 +1454,16 @@ private struct MeetingDetail: View {
                 .help("把纪要和双方的待办写成邮件，收件人默认是参会人")
                 .disabled(meeting.summary == nil)
                 Menu {
+                    // One click: the usual destination is a doc or chat, so straight to the clipboard.
+                    Button("拷贝为 Markdown") { copyMarkdown() }
+                        .keyboardShortcut("c", modifiers: [.command, .shift])
+                    Divider()
                     Button("Markdown…") { export(.markdown) }
                     Button("Word 文档…") { export(.word) }
                     Button("字幕（SRT）…") { export(.srt) }
                         .disabled(meeting.transcript?.isEmpty != false)
                 } label: {
-                    Label("导出", systemImage: "square.and.arrow.up")
+                    Label(copied ? "已拷贝" : "导出", systemImage: copied ? "checkmark" : "square.and.arrow.up")
                 }
                 .help("导出纪要和转写")
                 .disabled(meeting.summary == nil && meeting.transcript?.isEmpty != false)
@@ -1559,6 +1564,17 @@ private struct MeetingDetail: View {
     // MARK: Export
 
     private enum ExportKind { case markdown, word, srt }
+
+    private func copyMarkdown() {
+        let markdown = MeetingExport.markdown(meeting, myTodos: exportTodos, myName: UserIdentity.names.first ?? "我")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(markdown, forType: .string)
+        copied = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            copied = false
+        }
+    }
 
     private func export(_ kind: ExportKind) {
         let panel = NSSavePanel()

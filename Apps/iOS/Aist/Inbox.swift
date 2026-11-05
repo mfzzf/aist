@@ -116,7 +116,8 @@ final class Inbox: ObservableObject {
         while let note = pending.first {
             working = note
             do {
-                let assistant = NoteAssistant(client: LLMClient(config: try Self.config()), identity: Profile.names)
+                let assistant = NoteAssistant(client: LLMClient(config: try Self.config()), identity: Profile.names,
+                                              background: Profile.background)
                 let result = try await assistant.handle(note.text, images: images(of: note), todos: store.items, recent: turns)
                 removeImages(of: note)
                 pending.removeAll { $0.id == note.id }
@@ -264,6 +265,10 @@ final class Inbox: ObservableObject {
 /// The names the user goes by, so 「老板让 Alex…」 is understood as the user.
 enum Profile {
     static let namesKey = "profile.names"
+    static let backgroundKey = "profile.background"
+
+    /// What the user wrote about their work (products, projects, customers); see `TodoPrompt.background`.
+    static var background: String { UserDefaults.standard.string(forKey: backgroundKey) ?? "" }
 
     static var names: [String] {
         (UserDefaults.standard.string(forKey: namesKey) ?? "")

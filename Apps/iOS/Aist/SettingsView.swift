@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var loadingModels = false
     @State private var modelError: String?
     @AppStorage(Profile.namesKey) private var names = ""
+    @AppStorage(Profile.backgroundKey) private var background = ""
     @AppStorage(SpeechRecorder.localeKey) private var voiceLocale = SpeechRecorder.defaultLocale
 
     private var provider: LLMProvider? { state.current }
@@ -51,6 +52,15 @@ struct SettingsView: View {
                     Text("你的名字")
                 } footer: {
                     Text("中文名、英文名、常用称呼，用逗号分开。别人提到这些名字时，AI 知道说的是你。")
+                }
+
+                Section {
+                    TextField("我负责 Nimbus 客户端和模型接入；老板：Kevin；主要客户：Acme", text: $background, axis: .vertical)
+                        .lineLimit(2 ... 6)
+                } header: {
+                    Text("工作背景")
+                } footer: {
+                    Text("你负责的产品、项目、客户、老板。这些事没人点名时，AI 也会主动记给你；写「不归我管」的类别会跳过。")
                 }
 
                 Section {

@@ -60,10 +60,13 @@ public struct LiveNotes: Codable, Equatable, Sendable {
 public struct LiveNotesWriter: Sendable {
     public let client: LLMClient
     public var identity: [String]
+    /// The user's own description of their work (see `TodoPrompt.background`).
+    public var background: String
 
-    public init(client: LLMClient, identity: [String] = []) {
+    public init(client: LLMClient, identity: [String] = [], background: String = "") {
         self.client = client
         self.identity = identity
+        self.background = background
     }
 
     public func update(_ notes: LiveNotes, transcript: [TranscriptSegment], calendar: String?) async throws -> LiveNotes {
@@ -80,7 +83,7 @@ public struct LiveNotesWriter: Sendable {
             if !before.isEmpty { text += "上次已看到的最后几句：\n\(MeetingSummarizer.format(Array(before)))\n\n" }
         }
         text += "新的转写：\n\(MeetingSummarizer.format(new))"
-        let result = try await client.callTool(system: Self.systemPrompt(identity: identity), parts: [.text(text)],
+        let result = try await client.callTool(system: Self.systemPrompt(identity: identity, background: background), parts: [.text(text)],
                                                tool: Self.tool, maxTokens: 3000)
         var out: LiveNotes
         switch result {
@@ -101,8 +104,9 @@ public struct LiveNotesWriter: Sendable {
         return out
     }
 
-    static func systemPrompt(identity: [String]) -> String {
+    static func systemPrompt(identity: [String], background: String = "") -> String {
         let me = identity.isEmpty ? "" : "（用户的名字：\(identity.joined(separator: "、"))）"
+        let work = TodoPrompt.background(background).map { "\n\n" + $0 } ?? ""
         return """
         你是 Aist，在会议进行中帮用户做实时速记。转写里「我」是用户本人\(me)，「对方」是其他参会人。转写是机器识别的，会有错字和断句错误，按上下文理解。
 
@@ -116,7 +120,7 @@ public struct LiveNotesWriter: Sendable {
         - 每条 decisions / my_todos / others_todos 的 at 写依据那句话的时间（照抄行首 [mm:ss] 里的 mm:ss）
 
         要求：中文，简短具体，不写空话；保留之前速记里仍然成立的内容，修正被新内容推翻的；不要编造转写里没有的事。
-        调用 update_live_notes 工具提交。
+        调用 update_live_notes 工具提交。\(work)
         """
     }
 

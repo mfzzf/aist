@@ -2,7 +2,7 @@ import AistCore
 import Foundation
 
 // Usage: aist-cli ask "<question>" [--search …] [--then "<follow-up>"]   (see Ask.swift)
-//        aist-cli extract <image> [--app <front app name>] [--me "名字,别名"]
+//        aist-cli extract <image> [--app <front app name>] [--me "名字,别名"] [--background "<工作背景>"|@file]
 //        aist-cli email <file.txt> [--me ...]
 //        aist-cli meeting <transcript.txt> [--context <meeting-info.txt>]   (lines "我：…" / "对方：…")
 // Runs the same extraction the Mac app uses, without needing screen-recording permission.
@@ -15,6 +15,12 @@ guard args.count >= 3, ["extract", "email", "chat", "meeting", "note", "assist",
 }
 var me: [String] = []
 if let i = args.firstIndex(of: "--me"), i + 1 < args.count { me = args[i + 1].split(separator: ",").map(String.init) }
+// The user's work background (Settings → 通用 → 工作背景), inline or @path to a text file.
+var background = ""
+if let i = args.firstIndex(of: "--background"), i + 1 < args.count {
+    let v = args[i + 1]
+    background = v.hasPrefix("@") ? (try? String(contentsOfFile: String(v.dropFirst()), encoding: .utf8)) ?? "" : v
+}
 
 var frontApp: String?
 if let i = args.firstIndex(of: "--app"), i + 1 < args.count { frontApp = args[i + 1] }
@@ -46,7 +52,7 @@ do {
         if let i = args.firstIndex(of: "--context"), i + 1 < args.count {
             context = try String(contentsOfFile: args[i + 1], encoding: .utf8)
         }
-        let out = try await MeetingSummarizer(client: LLMClient(config: config), identity: me)
+        let out = try await MeetingSummarizer(client: LLMClient(config: config), identity: me, background: background)
             .summarize(transcript: segments, startedAt: .now, existing: [], notes: nil, calendar: context)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
@@ -55,7 +61,7 @@ do {
         print(String(decoding: try encoder.encode(out.myTodos), as: UTF8.self))
         exit(0)
     }
-    let extractor = TodoExtractor(client: LLMClient(config: config), identity: me)
+    let extractor = TodoExtractor(client: LLMClient(config: config), identity: me, background: background)
     let started = Date()
     var size = 0
     let todos: [ExtractedTodo]
@@ -87,7 +93,7 @@ do {
         // --image <file> (repeatable): attached photos / screenshots.
         let images = try args.indices.filter { args[$0] == "--image" && $0 + 1 < args.count }
             .map { try ImageCodec.jpeg(fromImageData: Data(contentsOf: URL(fileURLWithPath: args[$0 + 1]))) }
-        let result = try await NoteAssistant(client: LLMClient(config: config), identity: me)
+        let result = try await NoteAssistant(client: LLMClient(config: config), identity: me, background: background)
             .handle(text, images: images, todos: existing, recent: recent)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]

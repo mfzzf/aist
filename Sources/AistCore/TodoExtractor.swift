@@ -51,14 +51,31 @@ public struct CaptureContext: Sendable {
     }
 }
 
+/// What one extraction returned: the to-dos, plus the model's one-line reason when there are none
+/// ("是别人之间的讨论，没有交代给你"), so an empty result can say why instead of just "没有发现".
+public struct Extraction: Sendable, Equatable {
+    public var analysis: String?
+    public var noTodoReason: String?
+    public var todos: [ExtractedTodo]
+
+    public init(analysis: String? = nil, noTodoReason: String? = nil, todos: [ExtractedTodo]) {
+        self.analysis = analysis
+        self.noTodoReason = noTodoReason
+        self.todos = todos
+    }
+}
+
 public struct TodoExtractor: Sendable {
     public let client: LLMClient
     /// The user's names and handles (display name, email, GitHub login…), so "@张三" is recognised as the user.
     public var identity: [String]
+    /// The user's own description of their work (see `TodoPrompt.background`).
+    public var background: String
 
-    public init(client: LLMClient, identity: [String] = []) {
+    public init(client: LLMClient, identity: [String] = [], background: String = "") {
         self.client = client
         self.identity = identity
+        self.background = background
     }
 
     public enum ExtractError: LocalizedError {
@@ -72,11 +89,17 @@ public struct TodoExtractor: Sendable {
     /// Extracts the user's to-dos from a screenshot. `existing` lets the model mark repeats instead of duplicating them.
     public func extract(imageJPEG: Data, context: CaptureContext, existing: [TodoItem],
                         now: Date = .now, timeZone: TimeZone = .current) async throws -> [ExtractedTodo] {
+        try await analyze(imageJPEG: imageJPEG, context: context, existing: existing, now: now, timeZone: timeZone).todos
+    }
+
+    /// Same as `extract(imageJPEG:)`, keeping the model's reason when it found nothing.
+    public func analyze(imageJPEG: Data, context: CaptureContext, existing: [TodoItem],
+                        now: Date = .now, timeZone: TimeZone = .current) async throws -> Extraction {
         var info = "前台应用：\(context.frontApp ?? "未知")"
         if let title = context.windowTitle, !title.isEmpty { info += "\n窗口标题：\(title)" }
         info += "\n已有待办：\(Self.existingJSON(existing))"
-        return try Self.parse(await client.callTool(
-            system: TodoPrompt.extraction(.screenshot, identity: identity, now: now, timeZone: timeZone),
+        return try Self.parseExtraction(await client.callTool(
+            system: TodoPrompt.extraction(.screenshot, identity: identity, background: background, now: now, timeZone: timeZone),
             parts: [.image(imageJPEG, mediaType: "image/jpeg"), .text(info)],
             tool: TodoPrompt.recordTodos
         ))
@@ -86,7 +109,7 @@ public struct TodoExtractor: Sendable {
     public func extract(chatText: String, app: String, existing: [TodoItem] = [],
                         now: Date = .now, timeZone: TimeZone = .current) async throws -> [ExtractedTodo] {
         try Self.parse(await client.callTool(
-            system: TodoPrompt.extraction(.screenshot, identity: identity, now: now, timeZone: timeZone),
+            system: TodoPrompt.extraction(.screenshot, identity: identity, background: background, now: now, timeZone: timeZone),
             parts: [.text("（截图内容的文字版，「我：」开头的是右侧气泡，即用户本人）\n\(chatText)\n\n前台应用：\(app)\n已有待办：\(Self.existingJSON(existing))")],
             tool: TodoPrompt.recordTodos
         ))
@@ -97,7 +120,7 @@ public struct TodoExtractor: Sendable {
                         now: Date = .now, timeZone: TimeZone = .current) async throws -> [ExtractedTodo] {
         let text = "已有待办：\(Self.existingJSON(existing))\n\n邮件：\n\(email.prefix(24_000))"
         return try Self.parse(await client.callTool(
-            system: TodoPrompt.extraction(.email, identity: identity, now: now, timeZone: timeZone),
+            system: TodoPrompt.extraction(.email, identity: identity, background: background, now: now, timeZone: timeZone),
             parts: [.text(text)],
             tool: TodoPrompt.recordTodos
         ))
@@ -108,7 +131,7 @@ public struct TodoExtractor: Sendable {
                         now: Date = .now, timeZone: TimeZone = .current) async throws -> [ExtractedTodo] {
         let text = "已有待办：\(Self.existingJSON(existing))\n\n用户记下的话：\n\(note.prefix(12_000))"
         return try Self.parse(await client.callTool(
-            system: TodoPrompt.extraction(.note, identity: identity, now: now, timeZone: timeZone),
+            system: TodoPrompt.extraction(.note, identity: identity, background: background, now: now, timeZone: timeZone),
             parts: [.text(text)],
             tool: TodoPrompt.recordTodos
         ))
@@ -130,6 +153,10 @@ public struct TodoExtractor: Sendable {
 
     /// Tool arguments are the envelope itself; text falls back to the tolerant parser.
     public static func parse(_ result: LLMClient.ToolResult) throws -> [ExtractedTodo] {
+        try parseExtraction(result).todos
+    }
+
+    public static func parseExtraction(_ result: LLMClient.ToolResult) throws -> Extraction {
         if ProcessInfo.processInfo.environment["AIST_DEBUG"] != nil {
             let (kind, body): (String, String) = switch result {
             case let .arguments(d): ("tool", String(decoding: d, as: UTF8.self))
@@ -142,31 +169,47 @@ public struct TodoExtractor: Sendable {
             guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else {
                 throw ExtractError.unparsable(String(decoding: data, as: UTF8.self))
             }
-            return envelope.todos.filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            return envelope.extraction
         case let .text(raw):
-            return try parse(raw)
+            return try parseExtraction(raw)
         }
     }
 
     private struct Envelope: Decodable {
+        var analysis: String?
+        var noTodoReason: String?
         var todos: [ExtractedTodo]
+
+        enum CodingKeys: String, CodingKey {
+            case analysis, todos
+            case noTodoReason = "no_todo_reason"
+        }
+
+        var extraction: Extraction {
+            Extraction(analysis: analysis?.nilIfBlank, noTodoReason: noTodoReason?.nilIfBlank,
+                       todos: todos.filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        }
+    }
+
+    public static func parse(_ raw: String) throws -> [ExtractedTodo] {
+        try parseExtraction(raw).todos
     }
 
     /// Accepts `{"analysis": …, "todos": [...]}` (the current prompt) or a bare array (older prompts, other models),
     /// tolerating code fences and surrounding prose.
-    public static func parse(_ raw: String) throws -> [ExtractedTodo] {
+    public static func parseExtraction(_ raw: String) throws -> Extraction {
         if let start = raw.firstIndex(of: "{"), let end = raw.lastIndex(of: "}"), start < end,
            raw.firstIndex(of: "[").map({ start < $0 }) ?? true,
            let envelope = try? JSONDecoder().decode(Envelope.self, from: Data(raw[start ... end].utf8)) {
-            return envelope.todos.filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            return envelope.extraction
         }
         guard let start = raw.firstIndex(of: "["), let end = raw.lastIndex(of: "]"), start < end else {
             throw ExtractError.unparsable(raw)
         }
         let json = Data(raw[start ... end].utf8)
         do {
-            return try JSONDecoder().decode([ExtractedTodo].self, from: json)
-                .filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            return Extraction(todos: try JSONDecoder().decode([ExtractedTodo].self, from: json)
+                .filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
         } catch {
             throw ExtractError.unparsable(raw)
         }
@@ -181,5 +224,12 @@ public struct TodoExtractor: Sendable {
             if let date = fmt.date(from: string) { return date }
         }
         return nil
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        let t = trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
     }
 }

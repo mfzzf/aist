@@ -40,6 +40,7 @@ struct OnboardingView: View {
 
     @State private var step = 0
     @AppStorage(UserIdentity.namesKey) private var myNames = ""
+    @AppStorage(UserIdentity.backgroundKey) private var myBackground = ""
     @ObservedObject private var updater = Updater.shared
     private let steps = ["欢迎", "权限", "AI 模型", "自动化", "会议"]
 
@@ -121,6 +122,16 @@ struct OnboardingView: View {
                 } label: {
                     Text("你的名字")
                     Text("中英文名、昵称，逗号分隔。AI 据此认出别人在 @ 你、交代给你的事")
+                }
+                LabeledContent {
+                    TextField("工作背景", text: $myBackground,
+                              prompt: Text("我负责 Nimbus 客户端和模型接入\n老板：Kevin；主要客户：Acme"), axis: .vertical)
+                        .labelsHidden()
+                        .lineLimit(2 ... 6)
+                        .frame(width: 260)
+                } label: {
+                    Text("工作背景")
+                    Text("你负责的产品、项目、客户。这些事没人点名时，AI 也会主动记给你")
                 }
                 Toggle(isOn: Binding(
                     get: { SMAppService.mainApp.status == .enabled },

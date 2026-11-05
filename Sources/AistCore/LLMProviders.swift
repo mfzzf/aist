@@ -56,14 +56,15 @@ public struct LLMProvider: Codable, Identifiable, Sendable, Equatable, Hashable 
         return nil
     }
 
-    public func setAPIKey(_ key: String) {
+    /// False when the Keychain refused the write.
+    @discardableResult
+    public func setAPIKey(_ key: String) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            KeychainStore.delete(service: LLMConfig.keychainService, account: id)
             if id == "deepseek" { KeychainStore.delete(service: LLMConfig.keychainService) }
-        } else {
-            KeychainStore.write(trimmed, service: LLMConfig.keychainService, account: id)
+            return KeychainStore.delete(service: LLMConfig.keychainService, account: id)
         }
+        return KeychainStore.write(trimmed, service: LLMConfig.keychainService, account: id)
     }
 
     public var config: LLMConfig {

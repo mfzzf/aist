@@ -219,6 +219,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlay.onShowLive = { [weak self] in self?.liveWindow.show() }
         overlay.onOpenMain = { [weak self] pane, id in self?.mainWindow.show(pane, select: id) }
         overlay.onRecordEvent = { [weak self] event in Task { await self?.startMeeting(for: event) } }
+        // The menu bar item is the app's only always-visible UI (LSUIElement): set it up before anything
+        // that could stall or fail on an older system.
+        setUpStatusItem()
 
         let actions = MainActions(
             capture: { [weak self] in self?.captureAndAnalyze() },
@@ -255,7 +258,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &subscriptions)
         NSApp.mainMenu = buildMainMenu()
 
-        setUpStatusItem()
         overlay.anchorFrame = { [weak self] in self?.statusItem.button?.window?.frame }
 
         HotkeyManager.shared.onPress = { [weak self] in
@@ -326,14 +328,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let capture = try await ScreenCapturer.captureDisplayUnderMouse()
                 overlay.model.phase = .analyzing
                 let jpeg = try ImageCodec.jpeg(capture.image)
-                let extracted = try await TodoExtractor(client: LLMClient(config: config), identity: UserIdentity.names).extract(
+                let extraction = try await TodoExtractor(client: LLMClient(config: config), identity: UserIdentity.names,
+                                                         background: UserIdentity.background).analyze(
                     imageJPEG: jpeg,
                     context: CaptureContext(frontApp: capture.frontApp, windowTitle: capture.windowTitle),
                     existing: store.openItems
                 )
-                let result = store.apply(extracted, origin: .screenshot)
+                let result = store.apply(extraction.todos, origin: .screenshot)
                 if result.isEmpty {
-                    overlay.show(message: extracted.isEmpty ? "这屏没有发现待办" : "这些待办已经记下了", isError: false)
+                    // Say why, so an empty result reads as a judgment and not as a miss.
+                    let message = if !extraction.todos.isEmpty { "这些待办已经记下了" }
+                        else if let why = extraction.noTodoReason { "这屏没有待办：\(why)" }
+                        else { "这屏没有发现待办" }
+                    overlay.show(message: message, isError: false, for: extraction.noTodoReason == nil ? 4 : 6)
                 } else {
                     overlay.showResults(Set(result.added + result.updated))
                 }
@@ -450,7 +457,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let config = try LLMConfig.load()
             let current = meetings.meeting(id) ?? meeting
-            let out = try await MeetingSummarizer(client: LLMClient(config: config), identity: UserIdentity.names).summarize(
+            let out = try await MeetingSummarizer(client: LLMClient(config: config), identity: UserIdentity.names,
+                                                  background: UserIdentity.background).summarize(
                 transcript: transcript, startedAt: current.startedAt,
                 existing: store.openItems, notes: current.notes,
                 calendar: calendarContext(for: current)
@@ -582,7 +590,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let session = recorder.session
         session.makeWriter = {
             guard let config = try? LLMConfig.load() else { return nil }
-            return LiveNotesWriter(client: LLMClient(config: config), identity: UserIdentity.names)
+            return LiveNotesWriter(client: LLMClient(config: config), identity: UserIdentity.names,
+                                   background: UserIdentity.background)
         }
         session.calendarContext = { [weak self] in
             guard let self, let id = self.recorder.meetingID, let m = self.meetings.meeting(id) else { return nil }
@@ -720,6 +729,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // ⌘-dragging the item out of the bar hides it for good (persisted per app); bring it back.
+        statusItem.isVisible = true
         if let button = statusItem.button {
             button.imagePosition = .imageLeading
             button.target = self

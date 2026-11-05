@@ -5,10 +5,13 @@ import Foundation
 public struct MeetingSummarizer: Sendable {
     public let client: LLMClient
     public var identity: [String]
+    /// The user's own description of their work (see `TodoPrompt.background`).
+    public var background: String
 
-    public init(client: LLMClient, identity: [String] = []) {
+    public init(client: LLMClient, identity: [String] = [], background: String = "") {
         self.client = client
         self.identity = identity
+        self.background = background
     }
 
     public struct Output: Decodable, Sendable {
@@ -44,7 +47,7 @@ public struct MeetingSummarizer: Sendable {
         if let notes, !notes.isEmpty { text += "用户的会议备注：\(notes)\n" }
         text += "\n转写：\n" + Self.format(transcript)
         let result = try await client.callTool(
-            system: Self.systemPrompt(identity: identity, now: now, timeZone: timeZone),
+            system: Self.systemPrompt(identity: identity, background: background, now: now, timeZone: timeZone),
             parts: [.text(text)],
             tool: TodoPrompt.recordMinutes,
             maxTokens: 8000
@@ -70,13 +73,13 @@ public struct MeetingSummarizer: Sendable {
 
     /// Minutes on top of the shared to-do judgment (TodoPrompt), so meetings decide "is this mine?" the same way
     /// screenshots and email do.
-    static func systemPrompt(identity: [String], now: Date, timeZone: TimeZone) -> String {
+    static func systemPrompt(identity: [String], background: String = "", now: Date, timeZone: TimeZone) -> String {
         """
         你是 Aist，用户的会议助理。你会收到一场会议的机器转写，要写出会议纪要，并找出【用户本人接下来需要去做】的事。
 
         \(TodoPrompt.notes(.meeting))
 
-        \(TodoPrompt.shared(identity: identity, now: now, timeZone: timeZone))
+        \(TodoPrompt.shared(identity: identity, background: background, now: now, timeZone: timeZone))
 
         ## 纪要
         用中文，简洁、具体、不写空话：

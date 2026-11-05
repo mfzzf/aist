@@ -119,7 +119,8 @@ final class MailAutoTodo: ObservableObject {
         text += "时间：\(header.date.formatted(.iso8601))\n主题：\(header.subject)\n\n\(body.plainText)"
         var identity = UserIdentity.names
         if !myAddress.isEmpty, !identity.contains(myAddress) { identity.append(myAddress) }
-        let extracted = try await TodoExtractor(client: LLMClient(config: config), identity: identity)
+        let extracted = try await TodoExtractor(client: LLMClient(config: config), identity: identity,
+                                                background: UserIdentity.background)
             .extract(email: text, existing: store.openItems)
         let ref = EmailRef(accountID: account, mailbox: header.mailbox, uid: header.uid, subject: header.subject)
         return store.apply(extracted.map { e in

@@ -4,11 +4,19 @@ import Foundation
 /// what they typed in 设置 › 通用 › 你的名字, plus mail sender names and addresses, and the GitHub login.
 enum UserIdentity {
     static let namesKey = "profile.names"
+    static let backgroundKey = "profile.background"
 
     /// What the user typed, comma/space separated ("张三, Alex Zhang").
     static var typed: String {
         get { UserDefaults.standard.string(forKey: namesKey) ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: namesKey) }
+    }
+
+    /// What the user wrote about their work: products, projects, customers, boss. Fed to every to-do prompt
+    /// so things about those get claimed for the user even when nobody @-ed them.
+    static var background: String {
+        get { UserDefaults.standard.string(forKey: backgroundKey) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: backgroundKey) }
     }
 
     /// Kept up to date by AppDelegate from the mail accounts and GitHub.
