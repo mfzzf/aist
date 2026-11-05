@@ -29,6 +29,18 @@ SDK_VERSION=$(xcrun --sdk macosx --show-sdk-version)
 MIN_VERSION=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" Resources/Mac/Info.plist)
 vtool -set-build-version macos "$MIN_VERSION" "$SDK_VERSION" -replace \
   -output "$APP/Contents/MacOS/aist" "$APP/Contents/MacOS/aist"
+# Swift 6.2 back-deployment: the binary loads libswiftCompatibilitySpan.dylib via @rpath. macOS 26 has it
+# in /usr/lib/swift; macOS 15 doesn't, so the app crashes at launch unless it carries its own copy.
+# (Xcode embeds it automatically; SwiftPM doesn't.) Also drop the toolchain rpath SwiftPM leaves in.
+TOOLCHAIN_SWIFT=$(dirname "$(xcrun --find swift)")/../lib/swift-6.2/macosx
+mkdir -p "$APP/Contents/Frameworks"
+for lib in $(otool -L "$APP/Contents/MacOS/aist" | awk '/@rpath\/libswift/ {sub("@rpath/", "", $1); print $1}'); do
+    cp "$TOOLCHAIN_SWIFT/$lib" "$APP/Contents/Frameworks/"
+done
+install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/aist"
+otool -l "$APP/Contents/MacOS/aist" | awk '/path .*xctoolchain/ {print $2}' | while read -r rp; do
+    install_name_tool -delete_rpath "$rp" "$APP/Contents/MacOS/aist"
+done
 cp Resources/Mac/Info.plist "$APP/Contents/Info.plist"
 # The lproj folders tell AppKit the app speaks Chinese, so system controls (date pickers, menus,
 # dialogs) render in the user's locale instead of falling back to English.
@@ -67,11 +79,14 @@ if [[ $IDENTITY == "Developer ID"* ]]; then
     else
         echo "no provisioning profile at $PROFILE: iCloud sync off in this build" >&2
     fi
-    SIGN_FLAGS="--force --options runtime --timestamp --entitlements $ENTITLEMENTS"
+    LIB_FLAGS="--force --options runtime --timestamp"
+    SIGN_FLAGS="$LIB_FLAGS --entitlements $ENTITLEMENTS"
 else
-    SIGN_FLAGS="--force --timestamp=none"
+    LIB_FLAGS="--force --timestamp=none"
+    SIGN_FLAGS=$LIB_FLAGS
 fi
-SIGN_CMD="/usr/bin/codesign $SIGN_FLAGS --sign \"$IDENTITY\" \"$APP\""
+# Nested code first: codesign doesn't sign Contents/Frameworks for us.
+SIGN_CMD="/usr/bin/codesign $LIB_FLAGS --sign \"$IDENTITY\" \"$APP\"/Contents/Frameworks/*.dylib && /usr/bin/codesign $SIGN_FLAGS --sign \"$IDENTITY\" \"$APP\""
 
 # Over SSH the keychain is locked; gui-run.sh signs from the GUI session instead.
 if eval "$SIGN_CMD" 2>/dev/null || scripts/gui-run.sh "$SIGN_CMD"; then
