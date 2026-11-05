@@ -15,9 +15,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.5.1</string>
+	<string>0.5.2</string>
 	<key>CFBundleVersion</key>
-	<string>10</string>
+	<string>11</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh-Hans</string>
 	<key>CFBundleLocalizations</key>
@@ -37,6 +37,12 @@
 	<string>Aist 会把待办同步到「提醒事项」，通过 iCloud 出现在你的 iPhone 和 Apple Watch 上。</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Aist 会在你开始会议录音时使用麦克风，录音保存在这台 Mac 上。</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Mail bodies load images over plain http (common in newsletters); applies to WebKit only. -->
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>

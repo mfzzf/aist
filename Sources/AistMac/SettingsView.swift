@@ -145,7 +145,7 @@ private struct UpdateSection: View {
                     status
                     switch updater.state {
                     case let .available(release):
-                        Button("安装 \(release.version)") { Task { await updater.install(release) } }
+                        Button("安装 \(release.version)") { updater.install(release) }
                     case .checking, .downloading, .installing:
                         EmptyView()
                     default:
@@ -449,7 +449,10 @@ final class ProvidersModel: ObservableObject {
     @Published var state = LLMProviderStore.load()
     @Published var selection: String?
 
-    init() { selection = state.active }
+    init() {
+        // -aistShotProvider <id>: open 设置 › AI on that provider (for -aistShots).
+        selection = UserDefaults.standard.string(forKey: "aistShotProvider") ?? state.active
+    }
 
     var builtIns: [LLMProvider] { state.providers.filter { !$0.custom } }
     var customs: [LLMProvider] { state.providers.filter(\.custom) }
@@ -656,6 +659,8 @@ struct ProviderDetail: View {
     @State private var models: [LLMModelInfo] = []
     @State private var loadingModels = false
     @State private var test: TestState = .idle
+    @State private var pickingModel = false
+    @AppStorage(MeetingSettings.engineKey) private var meetingEngine = MeetingSettings.Engine.local.rawValue
 
     enum TestState: Equatable { case idle, running, ok(String), failed(String) }
 
@@ -729,26 +734,21 @@ struct ProviderDetail: View {
                         TextField("模型", text: $provider.model, prompt: Text("例如 \(provider.suggestedModels.first ?? "model-name")"))
                             .labelsHidden()
                             .autocorrectionDisabled()
-                        Menu {
-                            if models.isEmpty {
-                                Section(loadingModels ? "正在获取…" : "推荐（点 ↻ 获取最新列表）") {
-                                    ForEach(provider.suggestedModels, id: \.self) { m in
-                                        Button(m) { provider.model = m }
-                                    }
-                                }
-                            } else {
-                                Picker("模型", selection: $provider.model) {
-                                    ForEach(models) { m in
-                                        Text(Self.menuTitle(m)).tag(m.id)
-                                    }
-                                }
-                                .pickerStyle(.inline)
-                                .labelsHidden()
-                            }
+                        Button {
+                            pickingModel.toggle()
                         } label: { Image(systemName: "chevron.up.chevron.down") }
-                        .menuIndicator(.hidden)
-                        .fixedSize()
+                        .buttonStyle(.borderless)
                         .help("选择模型")
+                        .popover(isPresented: $pickingModel, arrowEdge: .bottom) {
+                            ModelPicker(selection: $provider.model,
+                                        models: models.isEmpty
+                                            ? provider.suggestedModels.map { LLMModelInfo(id: $0) }
+                                            : models,
+                                        note: models.isEmpty
+                                            ? (loadingModels ? "正在获取模型列表…" : "推荐模型 · 点 ↻ 获取最新列表")
+                                            : nil,
+                                        isPresented: $pickingModel)
+                        }
                         Button {
                             Task { await loadModels() }
                         } label: {
@@ -764,6 +764,25 @@ struct ProviderDetail: View {
                     } else if !models.isEmpty {
                         Text("最新：\(models[0].id)")
                     }
+                }
+            }
+
+            if provider.id == "umodelverse" {
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { meetingEngine == MeetingSettings.Engine.astraFlow.rawValue },
+                        set: { meetingEngine = ($0 ? MeetingSettings.Engine.astraFlow : .local).rawValue }
+                    )) {
+                        Text("用于会议实时转写")
+                        Text("转写：\(CloudEndpoint.transcribeModel)\n字幕翻译：\(CloudEndpoint.translateModel)")
+                    }
+                } header: {
+                    Text("会议")
+                } footer: {
+                    Text(meetingEngine == MeetingSettings.Engine.astraFlow.rawValue
+                         ? "会议录音时，有人说话的片段发送到 AstraFlow 识别，用这里的密钥，按时长计费。识别语言和字幕翻译在 设置 › 会议。"
+                         : "关闭时在本机识别，声音不出电脑。")
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -791,6 +810,13 @@ struct ProviderDetail: View {
         .onAppear { key = provider.apiKey ?? "" }
         .task {
             if !provider.needsKey || !key.isEmpty { await loadModels(quiet: true) }
+            // -aistShotPicker <query>: open the model list with that search (for screenshots).
+            if let q = UserDefaults.standard.string(forKey: "aistShotPicker") {
+                ModelPicker.initialQuery = q
+                if models.isEmpty { await loadModels(quiet: true) }
+                try? await Task.sleep(for: .seconds(0.5))
+                pickingModel = true
+            }
         }
     }
 
@@ -807,12 +833,6 @@ struct ProviderDetail: View {
 
     static func day(_ date: Date) -> String {
         date.formatted(.iso8601.year().month().day())
-    }
-
-    /// "deepseek-flash — DeepSeek-V4.1-Flash · 2026-10-17"
-    static func menuTitle(_ m: LLMModelInfo) -> String {
-        let extra = [m.name, m.created.map(day)].compactMap { $0 }
-        return extra.isEmpty ? m.id : "\(m.id)  —  \(extra.joined(separator: " · "))"
     }
 
     private func runTest() async {
@@ -839,6 +859,83 @@ struct ProviderDetail: View {
             }
         }
         return String(text.prefix(160))
+    }
+}
+
+/// The model list in a popover: type to filter, Return picks the first match, click picks any.
+private struct ModelPicker: View {
+    @Binding var selection: String
+    let models: [LLMModelInfo]
+    let note: String?
+    @Binding var isPresented: Bool
+    @State private var query = ModelPicker.initialQuery
+    @FocusState private var searchFocused: Bool
+    static var initialQuery = ""
+
+    private var filtered: [LLMModelInfo] {
+        let terms = query.lowercased().split(separator: " ")
+        guard !terms.isEmpty else { return models }
+        return models.filter { m in
+            let text = (m.id + " " + (m.name ?? "")).lowercased()
+            return terms.allSatisfy { text.contains($0) }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("搜索模型", text: $query, prompt: Text("搜索 \(models.count) 个模型"))
+                .textFieldStyle(.roundedBorder)
+                .focused($searchFocused)
+                .onSubmit { if let first = filtered.first { pick(first.id) } }
+                .padding(10)
+            if let note {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12).padding(.bottom, 6)
+            }
+            Divider()
+            let rows = filtered
+            if rows.isEmpty {
+                VStack(spacing: 8) {
+                    Text("没有匹配的模型").foregroundStyle(.secondary)
+                    if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Button("使用「\(query.trimmingCharacters(in: .whitespaces))」") {
+                            pick(query.trimmingCharacters(in: .whitespaces))
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(rows) { m in
+                    Button { pick(m.id) } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(m.id)
+                                let extra = [m.name, m.created.map(ProviderDetail.day)].compactMap { $0 }
+                                if !extra.isEmpty {
+                                    Text(extra.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            if m.id == selection {
+                                Image(systemName: "checkmark").foregroundStyle(.tint)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .listStyle(.plain)
+            }
+        }
+        .multilineTextAlignment(.leading)
+        .frame(width: 360, height: 420)
+        .onAppear { searchFocused = true }
+    }
+
+    private func pick(_ id: String) {
+        selection = id
+        isPresented = false
     }
 }
 

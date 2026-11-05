@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import Security
+import SwiftUI
 
 /// Updates from GitHub Releases (github.com/mfzzf/aist): checks the latest release, downloads its DMG,
 /// checks the new app is signed by the same Developer ID team, swaps it in and relaunches.
@@ -55,6 +56,7 @@ final class Updater: ObservableObject {
     }
 
     private var timer: Timer?
+    private var installTask: Task<Void, Never>?
     /// Versions already offered this session, so a periodic check doesn't nag.
     private var offered: Set<String> = []
 
@@ -192,7 +194,7 @@ final class Updater: ObservableObject {
         alert.addButton(withTitle: "跳过此版本")
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            Task { await install(release) }
+            install(release)
         case .alertThirdButtonReturn:
             UserDefaults.standard.set(release.version, forKey: Self.skipKey)
         default:
@@ -224,7 +226,21 @@ final class Updater: ObservableObject {
 
     // MARK: Install
 
-    func install(_ release: Release) async {
+    /// Downloads and installs in the background, with a small progress window that can cancel it.
+    func install(_ release: Release) {
+        switch state {
+        case .downloading, .installing: return
+        default: break
+        }
+        installTask = Task { await performInstall(release) }
+    }
+
+    /// Stops a download in progress; the release stays on offer.
+    func cancelInstall() {
+        installTask?.cancel()
+    }
+
+    private func performInstall(_ release: Release) async {
         let target = Bundle.main.bundleURL
         // Can't replace ourselves (e.g. installed by another admin user): send them to the download page.
         guard FileManager.default.isWritableFile(atPath: target.deletingLastPathComponent().path),
@@ -236,51 +252,78 @@ final class Updater: ObservableObject {
         }
         do {
             state = .downloading(0)
+            UpdateProgressWindow.show(version: release.version)
+            defer { UpdateProgressWindow.close() }
             let dmg = try await download(release.dmg, expected: release.size, sha256: release.sha256)
             state = .installing
+            try Task.checkCancellation()
             let staged = try await Task.detached { try Self.extractApp(from: dmg) }.value
             try Self.verify(staged)
+            try Task.checkCancellation()
             try relaunch(replacing: target, with: staged)
+        } catch where error is CancellationError || (error as? URLError)?.code == .cancelled {
+            state = .available(release)
         } catch {
             state = .failed(error.localizedDescription)
             alertFailure(error.localizedDescription)
         }
     }
 
+    /// Downloads with a system download task (the bytes never pass through the main actor) and checks the
+    /// SHA-256 off the main thread.
     private func download(_ url: URL, expected: Int, sha256: String?) async throws -> URL {
-        let (bytes, response) = try await URLSession.shared.bytes(from: url)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw UpdateError.http((response as? HTTPURLResponse)?.statusCode ?? 0)
-        }
-        let total = max(expected, Int(response.expectedContentLength))
-        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("Aist-update-\(UUID().uuidString).dmg")
-        FileManager.default.createFile(atPath: dest.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: dest)
-        defer { try? handle.close() }
-        var buffer = Data()
-        buffer.reserveCapacity(1 << 20)
-        var written = 0
-        var hasher = SHA256()
-        for try await byte in bytes {
-            buffer.append(byte)
-            if buffer.count >= 1 << 20 {
-                hasher.update(data: buffer)
-                try handle.write(contentsOf: buffer)
-                written += buffer.count
-                buffer.removeAll(keepingCapacity: true)
-                if total > 0 { state = .downloading(Double(written) / Double(total)) }
+        var request = URLRequest(url: url)
+        request.setValue("Aist", forHTTPHeaderField: "User-Agent")
+        let watcher = DownloadWatcher(expected: expected) { [weak self] fraction in
+            Task { @MainActor in
+                guard let self, case .downloading = self.state else { return }
+                self.state = .downloading(fraction)
             }
         }
-        hasher.update(data: buffer)
-        try handle.write(contentsOf: buffer)
+        let (file, response) = try await URLSession.shared.download(for: request, delegate: watcher)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            try? FileManager.default.removeItem(at: file)
+            throw UpdateError.http((response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("Aist-update-\(UUID().uuidString).dmg")
+        try FileManager.default.moveItem(at: file, to: dest)
         if let sha256 {
-            let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            let digest = try await Task.detached { try Self.sha256(of: dest) }.value
             guard digest == sha256 else {
                 try? FileManager.default.removeItem(at: dest)
                 throw UpdateError.checksum
             }
         }
         return dest
+    }
+
+    private nonisolated static func sha256(of file: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Reports a download task's progress; `URLSession.download(for:delegate:)` hands it the task on creation.
+    private final class DownloadWatcher: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        private let expected: Int
+        private let report: @Sendable (Double) -> Void
+        private var observation: NSKeyValueObservation?
+
+        init(expected: Int, report: @escaping @Sendable (Double) -> Void) {
+            self.expected = expected
+            self.report = report
+        }
+
+        func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
+            let expected = Int64(expected)
+            let report = report
+            observation = task.observe(\.countOfBytesReceived) { task, _ in
+                let total = task.countOfBytesExpectedToReceive > 0 ? task.countOfBytesExpectedToReceive : expected
+                if total > 0 { report(min(1, Double(task.countOfBytesReceived) / Double(total))) }
+            }
+        }
     }
 
     /// Mounts the DMG read-only, copies the app out, unmounts.
@@ -382,5 +425,79 @@ final class Updater: ObservableObject {
             case let .tool(name): "解开安装包失败（\(name)）"
             }
         }
+    }
+}
+
+/// A small window that shows the update downloading and installing, so clicking "install" visibly does
+/// something; closing it or clicking 取消 cancels the download.
+@MainActor
+private enum UpdateProgressWindow {
+    private static var window: NSWindow?
+    private static var delegate: Delegate?
+
+    static func show(version: String) {
+        if let window { window.makeKeyAndOrderFront(nil); return }
+        let host = NSHostingController(rootView: UpdateProgressView(version: version))
+        host.sizingOptions = [.preferredContentSize]
+        let window = NSWindow(contentViewController: host)
+        window.title = "更新 Aist"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        let delegate = Delegate()
+        window.delegate = delegate
+        window.center()
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+        self.window = window
+        self.delegate = delegate
+    }
+
+    static func close() {
+        guard let window else { return }
+        self.window = nil
+        window.delegate = nil
+        window.close()
+        delegate = nil
+    }
+
+    private final class Delegate: NSObject, NSWindowDelegate {
+        func windowWillClose(_ notification: Notification) {
+            MainActor.assumeIsolated {
+                UpdateProgressWindow.window = nil
+                UpdateProgressWindow.delegate = nil
+                Updater.shared.cancelInstall()
+            }
+        }
+    }
+}
+
+private struct UpdateProgressView: View {
+    let version: String
+    @ObservedObject private var updater = Updater.shared
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 52, height: 52)
+            VStack(alignment: .leading, spacing: 8) {
+                switch updater.state {
+                case let .downloading(p):
+                    Text("正在下载 Aist \(version)…").font(.headline)
+                    ProgressView(value: p)
+                    HStack {
+                        Text(p.formatted(.percent.precision(.fractionLength(0)))).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("取消") { updater.cancelInstall() }
+                    }
+                default:
+                    Text("正在安装 Aist \(version)…").font(.headline)
+                    ProgressView()
+                    Text("完成后会自动重新打开").foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
     }
 }

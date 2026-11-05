@@ -845,6 +845,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 tabs.selectedTabViewItemIndex = i
                 try? await Task.sleep(for: .seconds(1.5))
                 shoot(settingsWindow, "settings-\(i)")
+                for (n, popover) in NSApp.windows.filter({ $0.isVisible && $0.className.contains("Popover") }).enumerated() {
+                    shoot(popover, "settings-\(i)-popover-\(n)")
+                }
             }
         }
         settingsWindow?.close()
