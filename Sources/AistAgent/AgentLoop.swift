@@ -38,10 +38,11 @@ public struct AgentConfig: Sendable {
     public var options: StreamOptions
     public var systemPrompt: String?
     public var tools: [AgentTool]
-    public var maxTurns: Int
+    /// nil: no limit — the run ends when the model stops calling tools, or is cancelled.
+    public var maxTurns: Int?
 
     public init(model: Model, options: StreamOptions = StreamOptions(), systemPrompt: String? = nil,
-                tools: [AgentTool] = [], maxTurns: Int = 10) {
+                tools: [AgentTool] = [], maxTurns: Int? = nil) {
         self.model = model
         self.options = options
         self.systemPrompt = systemPrompt
@@ -81,7 +82,9 @@ public enum AgentLoop {
                 prompt.forEach(add)
 
                 let byName = Dictionary(config.tools.map { ($0.tool.name, $0) }, uniquingKeysWith: { a, _ in a })
-                for _ in 0..<config.maxTurns {
+                var turns = 0
+                while config.maxTurns.map({ turns < $0 }) ?? true, !Task.isCancelled {
+                    turns += 1
                     continuation.yield(.turnStart)
                     let context = Context(systemPrompt: config.systemPrompt, messages: messages, tools: config.tools.map(\.tool))
                     var final: AssistantMessage?

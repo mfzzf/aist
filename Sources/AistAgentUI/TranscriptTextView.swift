@@ -285,6 +285,8 @@ final class TranscriptCoordinator: NSObject, NSTextLayoutManagerDelegate {
               let end = tcm.location(start, offsetBy: found.length),
               let range = NSTextRange(location: start, end: end) else { return }
         tlm.invalidateLayout(for: range)
+        tlm.ensureLayout(for: range)
+        tlm.textViewportLayoutController.layoutViewport()
         doc.textView.needsLayout = true
         doc.textView.needsDisplay = true
     }
@@ -332,19 +334,34 @@ final class TranscriptCoordinator: NSObject, NSTextLayoutManagerDelegate {
         } else {
             for r in next[first...] { tail.append(r.string) }
         }
-        storage.replaceCharacters(in: NSRange(location: start + keep, length: storage.length - start - keep), with: tail)
+        let replaced = NSRange(location: start + keep, length: storage.length - start - keep)
         doc.rendered = next
+        // A rebuilt row identical to what's shown (a step's own view updated itself): leave the text alone.
+        guard replaced.length > 0 || tail.length > 0 else { return false }
+        storage.replaceCharacters(in: replaced, with: tail)
         return true
     }
 
-    /// Length of the shared beginning of two renderings of a row, never past the start of the old
-    /// string's last paragraph (its spacing changes once another paragraph follows it), and
-    /// treating embedded views as equal only when they are the same attachment object.
+    /// Length of the shared beginning of two renderings of a row, at a paragraph boundary,
+    /// treating embedded views as equal only when they are the same attachment object. An unchanged
+    /// row gives its whole length, so its embedded views stay where they are.
     private static func commonPrefix(_ old: NSAttributedString, _ new: NSAttributedString) -> Int {
         guard old.length > 0, new.length > 0 else { return 0 }
         let a = old.string as NSString, b = new.string as NSString
+        let full = sameCharacters(old, new, upTo: min(a.length, b.length))
+        let p = full == 0 ? 0 : (full == a.length ? full : a.paragraphRange(for: NSRange(location: full, length: 0)).location)
+        if p == 0 { return 0 }
+        if old.attributedSubstring(from: NSRange(location: 0, length: p))
+            .isEqual(to: new.attributedSubstring(from: NSRange(location: 0, length: p))) { return p }
+        // Same characters, different attributes (the old last paragraph's spacing, say): keep only up
+        // to the old string's last paragraph, which is the one whose attributes can change.
         let lastParagraph = a.paragraphRange(for: NSRange(location: old.length - 1, length: 0)).location
-        let limit = min(lastParagraph, min(a.length, b.length))
+        let limited = sameCharacters(old, new, upTo: min(lastParagraph, min(a.length, b.length)))
+        return limited == 0 ? 0 : a.paragraphRange(for: NSRange(location: limited, length: 0)).location
+    }
+
+    private static func sameCharacters(_ old: NSAttributedString, _ new: NSAttributedString, upTo limit: Int) -> Int {
+        let a = old.string as NSString, b = new.string as NSString
         var i = 0
         while i < limit {
             let c = a.character(at: i)
@@ -354,8 +371,7 @@ final class TranscriptCoordinator: NSObject, NSTextLayoutManagerDelegate {
                (new.attribute(.attachment, at: i, effectiveRange: nil) as AnyObject?) { break }
             i += 1
         }
-        // Back up to a paragraph start so no paragraph is left half old, half new.
-        return i == 0 ? 0 : a.paragraphRange(for: NSRange(location: i, length: 0)).location
+        return i
     }
 
     // MARK: Geometry
@@ -570,8 +586,12 @@ struct RowBuilder {
             assistant(out, messages: messages, results: results, live: live, isLast: isLast,
                       liveOverride: liveOverride, reuse: reuse)
         }
-        // The row ends with the row gap, whatever its last paragraph was.
-        setLastParagraphSpacing(out.string, style.rowGap)
+        // The row ends with the row gap, whatever its last paragraph was. Not while it's being
+        // answered: nothing follows it yet, and changing the spacing of whatever was last each time a
+        // part is added would replace (and re-create) that paragraph's embedded view every frame.
+        if case let .assistant(_, _, live) = row.kind, live {} else {
+            setLastParagraphSpacing(out.string, style.rowGap)
+        }
         return RowRender(signature: signature, string: out.string, attachments: out.attachments, missingHosts: out.missing)
     }
 
@@ -859,6 +879,10 @@ final class ViewAttachment: NSTextAttachment {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    // One embedded view per object: two renderings are the same only if they hold the same attachment.
+    override func isEqual(_ object: Any?) -> Bool { (object as AnyObject?) === self }
+    override var hash: Int { ObjectIdentifier(self).hashValue }
+
     /// Shows `view`; a hosted body is kept and only its root view replaced.
     // TextKit and the row builder only ever touch attachments on the main thread; the class can't be
     // marked @MainActor because NSTextAttachment's overrides are nonisolated.
@@ -933,12 +957,23 @@ final class HostingProvider: NSTextAttachmentViewProvider {
         tracksTextAttachmentViewBounds = true
     }
 
+    /// Each provider gets its own container and the attachment's one body view moves into it. TextKit
+    /// can make the new provider before it drops the old one; when the body itself was the provider's
+    /// view, dropping the old provider removed the body from the new one too (a row went blank).
+    /// The container clips, so a row that just expanded never draws over the rows below before they move.
     override func loadView() {
-        guard let v = attachment.bodyView else { view = NSView(); return }
-        v.removeFromSuperview()
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.masksToBounds = true
+        guard let v = attachment.bodyView else { view = container; return }
         let width = textLayoutManager?.textContainer?.size.width ?? v.frame.width
-        if width > 0 { v.frame.size = CGSize(width: width, height: attachment.height(for: width)) }
-        view = v
+        let height = width > 0 ? attachment.height(for: width) : v.frame.height
+        container.frame = CGRect(x: 0, y: 0, width: max(width, 0), height: height)
+        v.removeFromSuperview()
+        v.frame = container.bounds
+        v.autoresizingMask = [.width, .height]
+        container.addSubview(v)
+        view = container
     }
 
     override func attachmentBounds(for attributes: [NSAttributedString.Key: Any], location: any NSTextLocation,

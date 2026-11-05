@@ -257,7 +257,9 @@ struct ActivitySummary<Row: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                expanded.toggle()
+                // The text around the row moves in one step (TextKit can't follow a SwiftUI
+                // transition); the revealed content fades in where it lands.
+                withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
                     if hosts.isEmpty {
@@ -291,6 +293,7 @@ struct ActivitySummary<Row: View>: View {
                 .overlay(alignment: .leading) {
                     Rectangle().fill(.quaternary).frame(width: 1).offset(x: -1)
                 }
+                .transition(.opacity)
             }
         }
     }
@@ -475,7 +478,9 @@ struct StepRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button {
-                expanded.toggle()
+                // The text around the row moves in one step (TextKit can't follow a SwiftUI
+                // transition); the revealed content fades in where it lands.
+                withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: step.error != nil ? "exclamationmark.circle" : step.icon)
@@ -526,6 +531,7 @@ struct StepRow: View {
                 }
                 .font(.caption)
                 .padding(.leading, 22)
+                .transition(.opacity)
             }
         }
     }
@@ -542,7 +548,9 @@ struct ThinkingRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button {
-                expanded.toggle()
+                // The text around the row moves in one step (TextKit can't follow a SwiftUI
+                // transition); the revealed content fades in where it lands.
+                withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "brain").foregroundStyle(.secondary).frame(width: 16)
@@ -567,6 +575,7 @@ struct ThinkingRow: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .padding(.leading, 22)
+                .transition(.opacity)
             }
         }
     }
