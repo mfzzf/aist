@@ -32,6 +32,7 @@ struct TodoPanelView: View {
     @ObservedObject var store: TodoStore
     @ObservedObject var meetings: MeetingStore
     @ObservedObject var recorder: AudioRecorder
+    @ObservedObject var voice: VoiceNote
     let actions: PanelActions
 
     /// Rows ticked, showing the checkmark land before they leave.
@@ -54,6 +55,10 @@ struct TodoPanelView: View {
             header
             if recorder.isRecording, let start = recorder.startedAt {
                 RecordingBar(startedAt: start, live: recorder.live, onShowLive: actions.showLive, onStop: actions.stopMeeting)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            if voice.isActive {
+                VoiceBar(voice: voice)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
             ForEach(processing) { m in
@@ -96,6 +101,7 @@ struct TodoPanelView: View {
         .animation(OverlayModel.spring, value: processing.map(\.id))
         .animation(OverlayModel.spring, value: model.note)
         .animation(OverlayModel.spring, value: recorder.isRecording)
+        .animation(OverlayModel.spring, value: voice.isActive)
         .animation(OverlayModel.spring, value: model.meetingPrompt)
     }
 
@@ -198,7 +204,7 @@ struct TodoPanelView: View {
             Image(systemName: "checkmark.circle")
                 .font(.system(size: 24, weight: .light)).foregroundStyle(.tertiary)
             Text("没有待办").font(.system(size: 13, weight: .medium))
-            Text("按 \(HotkeyManager.shared.current.display) 截屏，AI 帮你找出待办")
+            Text("按 \(HotkeyManager.shared.current.display) 截屏，或按住 \(HotkeyManager.voice.current.display) 说出要做的事")
                 .font(.system(size: 11.5)).foregroundStyle(.secondary)
         }
         .multilineTextAlignment(.center)
@@ -418,6 +424,63 @@ private struct RecordingBar: View {
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Style.overdue.opacity(0.07)))
         .padding(.horizontal, 12)
         .padding(.bottom, 6)
+    }
+}
+
+/// 语音记待办 while listening (waveform, what's been heard so far) and while the AI reads it.
+private struct VoiceBar: View {
+    @ObservedObject var voice: VoiceNote
+
+    private var listening: Bool { voice.phase == .listening }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if listening {
+                    Waveform(levels: voice.levels).frame(width: 72, height: 16)
+                    Text("正在听…").font(.system(size: 12, weight: .medium))
+                } else {
+                    ProgressView().controlSize(.mini)
+                    Text("正在整理…").font(.system(size: 12, weight: .medium))
+                }
+                Spacer(minLength: 4)
+                if listening {
+                    Text("松开或再按 \(HotkeyManager.voice.current.display) 完成 · esc 取消")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            Text(voice.transcript.isEmpty ? "说出要做的事，比如「周五前把报价发给 Kevin」" : voice.transcript)
+                .font(.system(size: 12))
+                .foregroundStyle(voice.transcript.isEmpty ? .tertiary : .primary)
+                .lineLimit(4)
+                .truncationMode(.head)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.accentColor.opacity(0.08)))
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+        .animation(OverlayModel.spring, value: voice.phase)
+    }
+}
+
+/// Input level bars, newest on the right.
+private struct Waveform: View {
+    let levels: [CGFloat]
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 1.5) {
+            ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: 1.5, height: max(2, level * 16))
+            }
+        }
+        .animation(.linear(duration: 0.08), value: levels)
     }
 }
 

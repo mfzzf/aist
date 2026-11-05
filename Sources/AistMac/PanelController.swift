@@ -39,8 +39,11 @@ final class PanelController {
     /// Card width plus room for its shadow.
     private static let canvas = CGSize(width: TodoPanelView.width + 48, height: 680)
 
-    init(store: TodoStore, meetings: MeetingStore, recorder: AudioRecorder) {
+    let voice: VoiceNote
+
+    init(store: TodoStore, meetings: MeetingStore, recorder: AudioRecorder, voice: VoiceNote) {
         self.store = store
+        self.voice = voice
         panel = OverlayPanel(
             contentRect: CGRect(origin: .zero, size: Self.canvas),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -56,7 +59,7 @@ final class PanelController {
         panel.acceptsMouseMovedEvents = true
 
         let root = TodoPanelView(
-            model: model, store: store, meetings: meetings, recorder: recorder,
+            model: model, store: store, meetings: meetings, recorder: recorder, voice: voice,
             actions: PanelActions(
                 capture: { [weak self] in self?.onCapture?() },
                 startMeeting: { [weak self] in self?.onStartMeeting?() },
@@ -94,7 +97,10 @@ final class PanelController {
         }) { monitors.append(m) }
         if let m = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] e in
             guard e.keyCode == 53, let self, self.model.isOpen else { return e } // Esc
-            MainActor.assumeIsolated { self.close() }
+            MainActor.assumeIsolated {
+                // Esc while listening drops what was said; the panel stays for the next try.
+                if self.voice.phase == .listening { self.voice.cancel() } else { self.close() }
+            }
             return nil
         }) { monitors.append(m) }
     }

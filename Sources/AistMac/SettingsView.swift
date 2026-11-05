@@ -194,6 +194,7 @@ private struct GeneralSettings: View {
     @AppStorage(UserIdentity.namesKey) private var myNames = ""
     @AppStorage(UserIdentity.backgroundKey) private var myBackground = ""
     @State private var hotkey = HotkeyManager.shared.current
+    @State private var voiceHotkey = HotkeyManager.voice.current
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var screenOK = ScreenCapturer.hasPermission
 
@@ -208,6 +209,15 @@ private struct GeneralSettings: View {
                 } label: {
                     Text("截屏分析")
                     Text("框选屏幕区域提取待办")
+                }
+                LabeledContent {
+                    HotkeyRecorder(manager: .voice, hotkey: $voiceHotkey) { new in
+                        HotkeyManager.voice.current = new
+                        return HotkeyManager.voice.register() ? nil : "\(new.display) 已被系统或其他应用占用，请换一个"
+                    }
+                } label: {
+                    Text("语音记待办")
+                    Text("按住说话，松开交给 AI；也可以按一下开始、再按一下结束")
                 }
                 LabeledContent {
                     TextField("你的名字", text: $myNames, prompt: Text("张三, Alex"))
@@ -1009,6 +1019,7 @@ private struct ModelPicker: View {
 /// Click, then press the new combination — held modifiers show live, Esc cancels.
 /// The global hotkey is suspended while recording; if the new one can't be registered, the old one comes back.
 struct HotkeyRecorder: View {
+    var manager: HotkeyManager = .shared
     @Binding var hotkey: Hotkey
     /// Returns an error to show, or nil when the new hotkey is live.
     var onChange: (Hotkey) -> String?
@@ -1044,7 +1055,7 @@ struct HotkeyRecorder: View {
         problem = nil
         live = []
         recording = true
-        HotkeyManager.shared.unregister()
+        manager.unregister()
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             if event.type == .flagsChanged {
                 live = event.modifierFlags.intersection([.command, .option, .control, .shift])
@@ -1061,6 +1072,11 @@ struct HotkeyRecorder: View {
             }
             if let reason = new.rejectionReason {
                 problem = reason
+                NSSound.beep()
+                return nil
+            }
+            if let other = manager.clash(new) {
+                problem = "\(new.display) 已用于\(other === HotkeyManager.voice ? "语音记待办" : "截屏分析")"
                 NSSound.beep()
                 return nil
             }
@@ -1081,6 +1097,6 @@ struct HotkeyRecorder: View {
         live = []
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
-        HotkeyManager.shared.register()
+        manager.register()
     }
 }

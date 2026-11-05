@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var cloud = CloudSync(store: store)
     private var cloudTimer: Timer?
     private let recorder = AudioRecorder()
+    private lazy var voice = VoiceNote(store: store)
     private lazy var liveWindow = LiveMeetingWindow(recorder: recorder)
     private let calls = CallWatcher()
     private let player = AudioPlayback()
@@ -212,7 +213,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Updater.shared.start()
         setUpCloudSync()
 
-        overlay = PanelController(store: store, meetings: meetings, recorder: recorder)
+        overlay = PanelController(store: store, meetings: meetings, recorder: recorder, voice: voice)
+        voice.onBegin = { [weak self] in self?.overlay.open() }
+        voice.onMessage = { [weak self] text, isError, seconds in self?.overlay.show(message: text, isError: isError, for: seconds) }
+        voice.onResults = { [weak self] ids in self?.overlay.showResults(ids) }
         overlay.onCapture = { [weak self] in self?.captureAndAnalyze() }
         overlay.onStartMeeting = { [weak self] in Task { await self?.startMeeting() } }
         overlay.onStopMeeting = { [weak self] in Task { await self?.stopMeeting() } }
@@ -263,8 +267,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotkeyManager.shared.onPress = { [weak self] in
             MainActor.assumeIsolated { self?.captureAndAnalyze() }
         }
-        if !HotkeyManager.shared.register() {
-            overlay.show(message: "快捷键 \(HotkeyManager.shared.current.display) 被占用，请在设置里更换", isError: true, for: 6)
+        HotkeyManager.voice.onPress = { [weak self] in
+            MainActor.assumeIsolated { self?.voice.hotkeyPressed() }
+        }
+        HotkeyManager.voice.onRelease = { [weak self] in
+            MainActor.assumeIsolated { self?.voice.hotkeyReleased() }
+        }
+        let taken = HotkeyManager.all.filter { !$0.register() }.map(\.current.display)
+        if !taken.isEmpty {
+            overlay.show(message: "快捷键 \(taken.joined(separator: "、")) 被占用，请在设置里更换", isError: true, for: 6)
         }
 
         if !Onboarding.isDone { showOnboarding() }
@@ -815,6 +826,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "打开 Aist", action: #selector(menuOpenMain), keyEquivalent: "o")
         menu.addItem(.separator())
         menu.addItem(withTitle: "截屏分析待办（\(HotkeyManager.shared.current.display)）", action: #selector(menuCapture), keyEquivalent: "")
+        menu.addItem(withTitle: "语音记待办（\(HotkeyManager.voice.current.display)）", action: #selector(menuVoice), keyEquivalent: "")
         if recorder.isRecording {
             menu.addItem(withTitle: "结束会议录音", action: #selector(menuStopMeeting), keyEquivalent: "")
         } else {
@@ -831,6 +843,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuOpenMain() { mainWindow.show() }
     @objc private func menuCapture() { captureAndAnalyze() }
+    @objc private func menuVoice() { voice.hotkeyPressed() }
     @objc private func menuStartMeeting() { Task { await startMeeting() } }
     @objc private func menuStopMeeting() { Task { await stopMeeting() } }
     @objc private func menuQuit() { NSApp.terminate(nil) }

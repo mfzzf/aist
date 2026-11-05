@@ -71,3 +71,29 @@ private func item(_ title: String, due: Date? = nil, priority: TodoPriority = .m
     #expect(r.reply == "今天还有 2 件。")
     #expect(!r.isEmpty)
 }
+
+@MainActor @Test func applyingANoteCanBeUndone() throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("aist-test-\(UUID()).json")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let store = TodoStore(fileURL: url)
+    let ids = store.apply([ExtractedTodo(title: "寄样品给 Acme"), ExtractedTodo(title: "订会议室")], origin: .manual).added
+
+    let result = NoteResult(
+        reply: "好的",
+        add: [ExtractedTodo(title: "周五前把报价发给 Kevin")],
+        complete: [.init(id: ids[0].uuidString)],
+        update: [.init(id: ids[1].uuidString, title: "订周三的会议室")],
+        remove: [.init(id: UUID().uuidString)],  // made up: skipped
+        unresolved: ["上周那个"]
+    )
+    let report = store.apply(result, said: "报价周五前发给 Kevin，样品寄了，会议室改周三")
+    #expect(report.added.count == 1)
+    #expect(report.completed == [ids[0]])
+    #expect(report.changed == [ids[1]])
+    #expect(report.removed.isEmpty)
+    #expect(report.reply == "好的\n没找到对应的待办：上周那个")
+    #expect(store.describe(report).contains("新增「周五前把报价发给 Kevin」"))
+
+    store.undo(report)
+    #expect(store.openItems.map(\.title).sorted() == ["寄样品给 Acme", "订会议室"].sorted())
+}

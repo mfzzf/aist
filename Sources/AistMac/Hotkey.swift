@@ -76,36 +76,54 @@ struct Hotkey: Codable, Equatable {
     ]
 }
 
-/// Registers one system-wide hotkey via Carbon's RegisterEventHotKey —
+/// One system-wide hotkey, registered via Carbon's RegisterEventHotKey —
 /// the native API that needs no Accessibility permission.
 final class HotkeyManager {
-    static let shared = HotkeyManager()
+    /// 截屏分析.
+    static let shared = HotkeyManager(id: 1, defaultsKey: "hotkey", fallback: .fallback)
+    /// 语音记待办: hold to talk, or tap to start and tap again to finish.
+    static let voice = HotkeyManager(id: 2, defaultsKey: "hotkey.voice", fallback: Hotkey(
+        keyCode: UInt32(kVK_ANSI_V), modifiers: NSEvent.ModifierFlags([.control, .option]).rawValue, keyLabel: "V"))
+    static let all = [shared, voice]
 
     var onPress: (() -> Void)?
+    var onRelease: (() -> Void)?
+    private let id: UInt32
+    private let defaultsKey: String
+    private let fallback: Hotkey
     private var ref: EventHotKeyRef?
-    private var handlerInstalled = false
+    private static var handlerInstalled = false
 
-    private static let defaultsKey = "hotkey"
+    private init(id: UInt32, defaultsKey: String, fallback: Hotkey) {
+        self.id = id
+        self.defaultsKey = defaultsKey
+        self.fallback = fallback
+    }
 
     var current: Hotkey {
         get {
-            UserDefaults.standard.data(forKey: Self.defaultsKey)
-                .flatMap { try? JSONDecoder().decode(Hotkey.self, from: $0) } ?? .fallback
+            UserDefaults.standard.data(forKey: defaultsKey)
+                .flatMap { try? JSONDecoder().decode(Hotkey.self, from: $0) } ?? fallback
         }
         set {
-            UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: Self.defaultsKey)
+            UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: defaultsKey)
             register()
         }
+    }
+
+    /// The other Aist hotkey already using this combination, if any.
+    func clash(_ hotkey: Hotkey) -> HotkeyManager? {
+        Self.all.first { $0 !== self && $0.ref != nil && $0.current.keyCode == hotkey.keyCode && $0.current.modifiers == hotkey.modifiers }
     }
 
     /// Returns false if another app already owns the combination.
     @discardableResult
     func register() -> Bool {
         unregister()
-        installHandler()
+        Self.installHandler()
         let hk = current
-        let id = EventHotKeyID(signature: OSType(0x4149_5354), id: 1) // 'AIST'
-        let status = RegisterEventHotKey(hk.keyCode, hk.carbonModifiers, id, GetApplicationEventTarget(), 0, &ref)
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4149_5354), id: id) // 'AIST'
+        let status = RegisterEventHotKey(hk.keyCode, hk.carbonModifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
         return status == noErr
     }
 
@@ -114,13 +132,24 @@ final class HotkeyManager {
         ref = nil
     }
 
-    private func installHandler() {
+    private static func installHandler() {
         guard !handlerInstalled else { return }
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
-            DispatchQueue.main.async { HotkeyManager.shared.onPress?() }
+        var specs = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
+        ]
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+            guard let event else { return OSStatus(eventNotHandledErr) }
+            var hotKeyID = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                              nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
+            let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
+            DispatchQueue.main.async {
+                guard let manager = HotkeyManager.all.first(where: { $0.id == hotKeyID.id }) else { return }
+                pressed ? manager.onPress?() : manager.onRelease?()
+            }
             return noErr
-        }, 1, &spec, nil, nil)
+        }, specs.count, &specs, nil, nil)
         handlerInstalled = true
     }
 }
