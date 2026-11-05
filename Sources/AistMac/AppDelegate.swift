@@ -229,6 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let actions = MainActions(
             capture: { [weak self] in self?.captureAndAnalyze() },
+            voice: { [weak self] in self?.voice.hotkeyPressed() },
             startMeeting: { [weak self] in Task { await self?.startMeeting() } },
             stopMeeting: { [weak self] in Task { await self?.stopMeeting() } },
             retryMeeting: { [weak self] id in Task { await self?.process(id) } },
@@ -399,6 +400,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopMeeting(discardIfSilent: Bool = false) async {
         recorder.session.end()
         liveWindow.hide()
+        // Shown as being processed while the recorder winds down, not as still recording.
+        if let id = recorder.meetingID { meetings.update(id) { $0.status = .transcribing } }
         guard let (id, recording, live) = await recorder.stop() else { return }
         if discardIfSilent, let live, live.isEmpty {
             try? FileManager.default.removeItem(at: TodoStore.folder(for: recording.id))

@@ -5,6 +5,8 @@ import SwiftUI
 /// What the panel asks its owner to do.
 struct PanelActions {
     var capture: () -> Void
+    /// 语音记待办: start listening, or finish when already listening.
+    var voice: () -> Void
     var startMeeting: () -> Void
     var stopMeeting: () -> Void
     /// Bring up the "会议实况" window.
@@ -127,8 +129,13 @@ struct TodoPanelView: View {
                            action: actions.capture)
                     .transition(.opacity)
             }
+            IconButton(symbol: voice.phase == .listening ? "checkmark" : "mic",
+                       help: voice.phase == .listening ? "说完了，交给 AI"
+                           : "语音记待办（按住 \(HotkeyManager.voice.current.display) 说话，或点一下开始、再点一下结束）",
+                       action: actions.voice)
+                .disabled(voice.phase == .thinking)
             if !recorder.isRecording {
-                IconButton(symbol: "mic", help: "开始会议录音（麦克风 + 系统声音）", action: actions.startMeeting)
+                IconButton(symbol: "waveform", help: "开始会议录音（麦克风 + 系统声音）", action: actions.startMeeting)
                     .transition(.opacity)
             }
             IconButton(symbol: "macwindow", help: "打开 Aist 主窗口") { actions.openMain(nil, nil) }

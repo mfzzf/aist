@@ -33,6 +33,9 @@ final class RemindersSync: ObservableObject {
 
     private static let enabledKey = "remindersSync.enabled"
     private static let listKey = "remindersSync.listID"
+    /// Reminder ids linked to a to-do after the last pass. A reminder still in the list whose to-do is
+    /// gone was deleted in Aist (or on the phone): delete it too, instead of importing it back.
+    private static let linkedKey = "remindersSync.linked"
 
     var isEnabled: Bool { UserDefaults.standard.bool(forKey: Self.enabledKey) }
 
@@ -114,6 +117,13 @@ final class RemindersSync: ObservableObject {
                 }
             }
 
+            let linked = Set(UserDefaults.standard.stringArray(forKey: Self.linkedKey) ?? [])
+            for reminder in remaining.values where linked.contains(reminder.calendarItemIdentifier) {
+                try ek.remove(reminder, commit: false)
+                changed = true
+                remaining[reminder.calendarItemIdentifier] = nil
+            }
+
             // New in Reminders (added on iPhone, by Siri…): becomes a to-do.
             for reminder in remaining.values where !reminder.isCompleted {
                 var item = TodoItem(
@@ -130,6 +140,7 @@ final class RemindersSync: ObservableObject {
             }
 
             if changed { try ek.commit() }
+            UserDefaults.standard.set(store.items.compactMap(\.reminderID), forKey: Self.linkedKey)
             status = .on(list.title)
             lastSync = .now
         } catch {

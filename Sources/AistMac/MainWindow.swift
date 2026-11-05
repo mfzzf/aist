@@ -44,6 +44,8 @@ final class MainModel: ObservableObject {
 
 struct MainActions {
     var capture: () -> Void
+    /// 语音记待办: start listening, or finish when already listening.
+    var voice: () -> Void
     var startMeeting: () -> Void
     var stopMeeting: () -> Void
     var retryMeeting: (UUID) -> Void
@@ -331,6 +333,11 @@ struct MainView: View {
             .disabled(overlay.isBusy)
             .help("截屏分析待办（\(HotkeyManager.shared.current.display)）")
 
+            Button(action: actions.voice) {
+                Label("语音记待办", systemImage: "mic")
+            }
+            .help("语音记待办：按住 \(HotkeyManager.voice.current.display) 说话，或点一下开始、再点一下结束")
+
             if recorder.isRecording, let start = recorder.startedAt {
                 Button(action: actions.stopMeeting) {
                     Label {
@@ -345,7 +352,7 @@ struct MainView: View {
                 .help("结束录音，生成会议纪要")
             } else {
                 Button(action: actions.startMeeting) {
-                    Label("会议录音", systemImage: "mic")
+                    Label("会议录音", systemImage: "waveform")
                 }
                 .help("开始会议录音（麦克风 + 系统声音）")
             }

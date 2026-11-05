@@ -62,6 +62,7 @@ final class PanelController {
             model: model, store: store, meetings: meetings, recorder: recorder, voice: voice,
             actions: PanelActions(
                 capture: { [weak self] in self?.onCapture?() },
+                voice: { [weak self] in self?.voice.hotkeyPressed() },
                 startMeeting: { [weak self] in self?.onStartMeeting?() },
                 stopMeeting: { [weak self] in self?.onStopMeeting?() },
                 showLive: { [weak self] in self?.onShowLive?() },

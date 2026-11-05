@@ -32,8 +32,11 @@ final class AudioRecorder: ObservableObject {
         var errorDescription: String? { "找不到可录制的显示器" }
     }
 
+    /// The last recording is still winding down (see `stop`); a new one waits for it.
+    private var stopping = false
+
     func start(for meeting: UUID, language: String = "zh-CN", translateTo: Locale.Language? = nil) async throws {
-        guard meetingID == nil else { return }
+        guard meetingID == nil, !stopping else { return }
         let micAllowed = await AVCaptureDevice.requestAccess(for: .audio)
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -75,22 +78,44 @@ final class AudioRecorder: ObservableObject {
     /// (nil when it didn't work), or nil if nothing was recording.
     func stop() async -> (meeting: UUID, recording: TodoRecording, transcript: [TranscriptSegment]?)? {
         guard let stream, let sink, let meetingID, let startedAt, let recordingID else { return nil }
-        try? await stream.stopCapture()
-        let result = await sink.finish()
-        let transcript = await live.finish()
+        // Not recording from here on: the UI says so at once, and a second 结束录音 is a no-op while
+        // the capture and the transcriber wind down.
         self.stream = nil
         self.sink = nil
         self.meetingID = nil
         self.startedAt = nil
         self.recordingID = nil
+        stopping = true
+        defer { stopping = false }
+        let duration = Date.now.timeIntervalSince(startedAt)
+        // Either can stall (ScreenCaptureKit, SpeechAnalyzer's finalize); neither may keep the meeting open.
+        // Without the live transcript the files are transcribed after the meeting instead.
+        await Self.within(5, else: ()) { try? await stream.stopCapture() }
+        let result = await sink.finish()
+        let live = self.live
+        let transcript = await Self.within(10, else: nil) { await live.finish() }
 
         var offset: Double?
         if let s = result.system.start, let m = result.mic.start { offset = m - s }
         let recording = TodoRecording(
-            id: recordingID, startedAt: startedAt, duration: Date.now.timeIntervalSince(startedAt),
+            id: recordingID, startedAt: startedAt, duration: duration,
             hasSystemAudio: result.system.ok, hasMicrophone: result.mic.ok, micOffset: offset
         )
         return (meetingID, recording, transcript)
+    }
+
+    /// `work`'s result, or `fallback` if it takes longer than `seconds` (the work is left to finish on its own).
+    private static func within<T: Sendable>(_ seconds: Double, else fallback: T,
+                                            _ work: @escaping @MainActor () async -> T) async -> T {
+        let once = Once<T>()
+        return await withCheckedContinuation { c in
+            once.set(c)
+            Task { @MainActor in once.resume(await work()) }
+            Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                once.resume(fallback)
+            }
+        }
     }
 }
 
@@ -321,5 +346,21 @@ final class AudioPlayback: NSObject, ObservableObject, AVAudioPlayerDelegate {
             self.updatePosition()
             if self.isPlaying, self.position >= self.duration - 0.3 { self.finished() }
         }
+    }
+}
+
+/// A continuation resumed by whichever side gets there first.
+private final class Once<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Never>?
+
+    func set(_ c: CheckedContinuation<T, Never>) { lock.withLock { continuation = c } }
+
+    func resume(_ value: T) {
+        let c = lock.withLock { () -> CheckedContinuation<T, Never>? in
+            defer { continuation = nil }
+            return continuation
+        }
+        c?.resume(returning: value)
     }
 }
