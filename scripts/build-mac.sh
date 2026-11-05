@@ -44,6 +44,15 @@ for size in 16 32 128 256 512; do
     sips -z $((size * 2)) $((size * 2)) Resources/Mac/AppIcon.png --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+# macOS 26 draws icons from the asset catalog (CFBundleIconName) and puts a legacy icon that doesn't
+# fill its square on a grey plate. Resources/Mac/AppIcon.icon is the full-bleed artwork in Icon
+# Composer format; the system applies the shape. The .icns above stays for older systems.
+ICONCAR=$(mktemp -d)
+xcrun actool Resources/Mac/AppIcon.icon --compile "$ICONCAR" --platform macosx --target-device mac \
+    --minimum-deployment-target 15.0 --app-icon AppIcon --include-all-app-icons \
+    --output-partial-info-plist "$ICONCAR/partial.plist" --errors >/dev/null
+cp "$ICONCAR/Assets.car" "$APP/Contents/Resources/"
+rm -rf "$ICONCAR"
 
 # Developer ID builds are for distribution: hardened runtime + secure timestamp, as notarization requires.
 # iCloud sync needs a Developer ID provisioning profile granting iCloud + push for this app ID; kept out
