@@ -2,7 +2,7 @@ import AistCore
 import AVFoundation
 import Foundation
 
-// Live meeting transcription by Gemini on AstraFlow (设置 › 会议 › 识别引擎), the alternative to
+// Live meeting transcription by Gemini on AstraFlow (设置 › AI › AstraFlow › 会中实时转写), the alternative to
 // Apple's on-device SpeechAnalyzer. Each side (me / others) gets its own WebSocket session to
 // gemini-3.5-transcribe-live-preview; with subtitles on, a second one per side to
 // gemini-3.5-live-translate-preview supplies the translations. Protocol:
@@ -10,8 +10,11 @@ import Foundation
 
 /// Where and with which key: the AstraFlow provider from 设置 › AI (its region picks the node).
 struct CloudEndpoint: Sendable {
+    /// The realtime node (WebSocket).
     var host: String
     var key: String
+    /// The chosen region's HTTP API, "https://…/v1".
+    var base: URL
 
     static let transcribeModel = "gemini-3.5-transcribe-live-preview"
     static let translateModel = "gemini-3.5-live-translate-preview"
@@ -23,7 +26,8 @@ struct CloudEndpoint: Sendable {
         // $AIST_ASTRAFLOW_KEY: for test runs from a shell.
         let env = ProcessInfo.processInfo.environment["AIST_ASTRAFLOW_KEY"]
         guard let key = env ?? provider.apiKey, !key.isEmpty else { return nil }
-        return CloudEndpoint(host: wsHost(forBaseURL: provider.baseURL), key: key)
+        guard let base = URL(string: provider.baseURL) else { return nil }
+        return CloudEndpoint(host: wsHost(forBaseURL: provider.baseURL), key: key, base: base)
     }
 
     /// The realtime nodes: Mainland China, Singapore, Los Angeles, Frankfurt. The chat regions

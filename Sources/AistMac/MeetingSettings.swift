@@ -11,6 +11,9 @@ enum MeetingSettings {
     static let showLiveWindowKey = "meeting.showLiveWindow"
     static let shareLiveWindowKey = "meeting.shareLiveWindow"
     static let engineKey = "meeting.engine"
+    /// "" (off) or a `CloudFileTranscriber.Model`: transcribe the recording on AstraFlow after the
+    /// meeting when Gemini didn't transcribe it live.
+    static let afterModelKey = "meeting.afterModel"
 
     enum Engine: String, CaseIterable {
         /// Apple SpeechAnalyzer, on this Mac.
@@ -30,6 +33,7 @@ enum MeetingSettings {
             showLiveWindowKey: true,
             shareLiveWindowKey: false,
             engineKey: Engine.local.rawValue,
+            afterModelKey: "",
         ])
     }
 
@@ -47,6 +51,10 @@ enum MeetingSettings {
 
     /// Cheap enough for view bodies: a missing key is found (and reported) when the meeting starts.
     static var usesCloud: Bool { engine == .astraFlow }
+
+    static var afterModel: CloudFileTranscriber.Model? {
+        CloudFileTranscriber.Model(rawValue: UserDefaults.standard.string(forKey: afterModelKey) ?? "")
+    }
 
     static var liveNotes: Bool { UserDefaults.standard.bool(forKey: liveNotesKey) }
     static var endOnHangUp: Bool { UserDefaults.standard.bool(forKey: endOnHangUpKey) }

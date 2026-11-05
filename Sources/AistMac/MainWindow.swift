@@ -1524,7 +1524,9 @@ private struct MeetingDetail: View {
             Section {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text(meeting.status == .transcribing ? "正在本机转写录音…" : "正在生成纪要和待办…")
+                    Text(meeting.status == .transcribing
+                         ? (MeetingSettings.afterModel != nil ? "正在用 AstraFlow 转写录音…" : "正在本机转写录音…")
+                         : "正在生成纪要和待办…")
                         .foregroundStyle(.secondary)
                 }
             }

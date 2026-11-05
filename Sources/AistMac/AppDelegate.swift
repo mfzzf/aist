@@ -66,6 +66,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in await CloudSelfTest.run(files.split(separator: ",").map(String.init)) }
             return
         }
+        if let spec = args["aistCloudFile"] as? String {
+            Task { @MainActor in await CloudFileTranscriber.selfTest(spec) }
+            return
+        }
+        // -aistLLMTest <provider id>:<model>: one "ping" through that provider (key from the keychain),
+        // full reply or error to /tmp/aist-llm-test.log, then quit.
+        if let spec = args["aistLLMTest"] as? String, let colon = spec.firstIndex(of: ":") {
+            Task { @MainActor in
+                let id = String(spec[..<colon]), model = String(spec[spec.index(after: colon)...])
+                var out = ""
+                if var provider = LLMProviderStore.load().providers.first(where: { $0.id == id }) {
+                    provider.model = model
+                    do {
+                        out = "OK: " + (try await LLMClient(config: provider.config)
+                            .complete(system: "Reply with OK.", parts: [.text("ping")], maxTokens: 16))
+                    } catch {
+                        out = "ERROR: \(error)\nshown: \(ProviderDetail.short(error))"
+                    }
+                } else {
+                    out = "no provider \(id)"
+                }
+                try? out.write(toFile: "/tmp/aist-llm-test.log", atomically: true, encoding: .utf8)
+                exit(0)
+            }
+            return
+        }
         guard let pane = args["aistOpenPane"] as? String else { return }
         FileManager.default.createFile(atPath: "/tmp/aist-nav.log", contents: nil)
         NavTrace.file = FileHandle(forWritingAtPath: "/tmp/aist-nav.log")
@@ -372,19 +398,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             overlay.show(message: "没有录到声音（检查麦克风权限）", isError: true)
             return
         }
+        // Transcribed live by Gemini: keep it, the minutes can start right away. Otherwise, with
+        // 会后转写 on, AstraFlow transcribes the files and the on-device live lines are the fallback.
+        let heard = live?.isEmpty == false ? live : nil
+        let transcribeAfter = MeetingSettings.afterModel != nil && !(recorder.live.usedCloud && heard != nil)
         meetings.update(id) {
             $0.recording = recording
             $0.duration = recording.duration
             $0.status = .transcribing
-            // Transcribed live: the minutes can start right away. Nothing heard live → try the files.
-            if let live, !live.isEmpty { $0.transcript = live }
+            if !transcribeAfter, let heard { $0.transcript = heard }
         }
         linkCalendarEvent(id)
-        await process(id)
+        await process(id, fallback: transcribeAfter ? heard : nil)
     }
 
-    /// Transcribe (once) and summarize; also used for "重试 / 重新生成纪要".
-    private func process(_ id: UUID) async {
+    /// Transcribe (once) and summarize; also used for "重试 / 重新生成纪要". `fallback`: the live
+    /// transcript, kept if transcribing the files fails.
+    private func process(_ id: UUID, fallback: [TranscriptSegment]? = nil) async {
         guard let meeting = meetings.meeting(id), let recording = meeting.recording, meeting.status != .recording else { return }
         do {
             var transcript = meeting.transcript
@@ -393,7 +423,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     $0.status = .transcribing
                     $0.error = nil
                 }
-                let segments = try await MeetingTranscriber.transcribe(recording)
+                let segments: [TranscriptSegment]
+                do {
+                    segments = try await transcribeFiles(recording)
+                } catch where fallback != nil && !(error is CancellationError) {
+                    segments = fallback ?? []
+                    overlay.show(message: "\(error.localizedDescription)；已保留会中实时转写的内容", isError: true, for: 6,
+                                 target: .init(pane: .meetings, id: id))
+                }
                 transcript = segments
                 meetings.update(id) { $0.transcript = segments }
             }
@@ -450,6 +487,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             overlay.show(message: "会议处理失败：\(error.localizedDescription)", isError: true, for: 6,
                          target: .init(pane: .meetings, id: id))
+        }
+    }
+
+    /// The recording's transcript: on AstraFlow when 会后转写 is on (falling back to this Mac if
+    /// that fails and the Mac can), else on this Mac.
+    private func transcribeFiles(_ recording: TodoRecording) async throws -> [TranscriptSegment] {
+        guard let model = MeetingSettings.afterModel, let endpoint = CloudEndpoint.astraFlow() else {
+            return try await MeetingTranscriber.transcribe(recording)
+        }
+        do {
+            return try await CloudFileTranscriber.transcribe(recording, model: model, endpoint: endpoint,
+                                                             language: MeetingSettings.language)
+        } catch {
+            guard !(error is CancellationError), let local = try? await MeetingTranscriber.transcribe(recording),
+                  !local.isEmpty else { throw error }
+            return local
         }
     }
 

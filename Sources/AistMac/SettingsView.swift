@@ -44,6 +44,7 @@ enum SettingsWindow {
 private struct MeetingSettingsView: View {
     @ObservedObject var calendar: CalendarCenter
     @AppStorage(MeetingSettings.engineKey) private var engine = MeetingSettings.Engine.local.rawValue
+    @AppStorage(MeetingSettings.afterModelKey) private var afterModel = ""
     @AppStorage(MeetingSettings.languageKey) private var language = "auto"
     @AppStorage(MeetingSettings.translateToKey) private var translateTo = ""
     @AppStorage(MeetingSettings.liveNotesKey) private var liveNotes = true
@@ -56,14 +57,11 @@ private struct MeetingSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker(selection: $engine) {
-                    Text("本机（Apple）").tag(MeetingSettings.Engine.local.rawValue)
-                    Text("AstraFlow Gemini").tag(MeetingSettings.Engine.astraFlow.rawValue)
+                LabeledContent {
+                    Text(engineName)
                 } label: {
-                    Text("识别引擎")
-                    Text(engine == MeetingSettings.Engine.astraFlow.rawValue
-                         ? "声音发送到 AstraFlow 识别，用 设置 › AI 里的密钥和地域，按时长计费"
-                         : "在本机识别，声音不出电脑")
+                    Text("识别")
+                    Text("在 设置 › AI › AstraFlow 里切换")
                 }
                 Picker("识别语言", selection: $language) {
                     ForEach(LiveTranscript.languageChoices, id: \.id) { Text($0.name).tag($0.id) }
@@ -79,7 +77,7 @@ private struct MeetingSettingsView: View {
                 Text("实时转写")
             } footer: {
                 if engine == MeetingSettings.Engine.astraFlow.rawValue {
-                    Text("Gemini 自动识别说话的语言；字幕翻译也由 AstraFlow 实时完成。只上传有人说话的片段。").foregroundStyle(.secondary)
+                    Text("AstraFlow 自动识别说话的语言，字幕翻译也由它实时完成。只上传有人说话的片段。").foregroundStyle(.secondary)
                 } else if !LiveTranscript.isSupported {
                     Text("本机实时转写需要 macOS 26；当前系统会在会议结束后转写。").foregroundStyle(.secondary)
                 } else {
@@ -129,6 +127,11 @@ private struct MeetingSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var engineName: String {
+        let live = engine == MeetingSettings.Engine.astraFlow.rawValue ? "AstraFlow" : "本机"
+        return afterModel.isEmpty ? live : "\(live)，会后 AstraFlow 转写"
     }
 }
 
@@ -661,6 +664,17 @@ struct ProviderDetail: View {
     @State private var test: TestState = .idle
     @State private var pickingModel = false
     @AppStorage(MeetingSettings.engineKey) private var meetingEngine = MeetingSettings.Engine.local.rawValue
+    @AppStorage(MeetingSettings.afterModelKey) private var afterModel = ""
+
+    private var meetingFooter: String {
+        let live = meetingEngine == MeetingSettings.Engine.astraFlow.rawValue
+        switch (live, !afterModel.isEmpty) {
+        case (true, true): return "会议中由 AstraFlow 实时转写并保存；实时转写没成功时，散会后再转写录音。只发送有人说话的片段，按时长计费。"
+        case (true, false): return "会议中有人说话的片段发送到 AstraFlow 实时识别并保存，按时长计费。识别语言和字幕翻译在 设置 › 会议。"
+        case (false, true): return "会议中在本机实时识别；散会后把录音里有人说话的片段发到 AstraFlow 重新转写，作为正式记录，按时长计费。"
+        case (false, false): return "都关闭时在本机识别，声音不出电脑。"
+        }
+    }
 
     enum TestState: Equatable { case idle, running, ok(String), failed(String) }
 
@@ -767,25 +781,6 @@ struct ProviderDetail: View {
                 }
             }
 
-            if provider.id == "umodelverse" {
-                Section {
-                    Toggle(isOn: Binding(
-                        get: { meetingEngine == MeetingSettings.Engine.astraFlow.rawValue },
-                        set: { meetingEngine = ($0 ? MeetingSettings.Engine.astraFlow : .local).rawValue }
-                    )) {
-                        Text("用于会议实时转写")
-                        Text("转写：\(CloudEndpoint.transcribeModel)\n字幕翻译：\(CloudEndpoint.translateModel)")
-                    }
-                } header: {
-                    Text("会议")
-                } footer: {
-                    Text(meetingEngine == MeetingSettings.Engine.astraFlow.rawValue
-                         ? "会议录音时，有人说话的片段发送到 AstraFlow 识别，用这里的密钥，按时长计费。识别语言和字幕翻译在 设置 › 会议。"
-                         : "关闭时在本机识别，声音不出电脑。")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
             Section {
                 HStack {
                     Button("测试连接") { Task { await runTest() } }
@@ -797,7 +792,9 @@ struct ProviderDetail: View {
                         Label("连接成功 · \(ms)", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                     case let .failed(msg):
                         Label(msg, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red).lineLimit(2).help(msg)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
                     }
                     Spacer()
                     if provider.custom {
@@ -805,15 +802,42 @@ struct ProviderDetail: View {
                     }
                 }
             }
+            if provider.id == "umodelverse" {
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { meetingEngine == MeetingSettings.Engine.astraFlow.rawValue },
+                        set: { meetingEngine = ($0 ? MeetingSettings.Engine.astraFlow : .local).rawValue }
+                    )) {
+                        Text("会中实时转写")
+                        Text("边开会边出文字，可同时翻译字幕")
+                    }
+                    Picker(selection: $afterModel) {
+                        Text("关闭").tag("")
+                        Text("区分说话人").tag(CloudFileTranscriber.Model.diarize.rawValue)
+                        Text("快速").tag(CloudFileTranscriber.Model.gemini.rawValue)
+                    } label: {
+                        Text("会后转写")
+                        Text(afterModel == CloudFileTranscriber.Model.diarize.rawValue
+                             ? "能分出不同说话人，稍慢"
+                             : afterModel.isEmpty ? "没开实时转写时，散会后转写录音" : "按句转写，更快")
+                    }
+                } header: {
+                    Text("会议")
+                } footer: {
+                    Text(meetingFooter).foregroundStyle(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
         .onAppear { key = provider.apiKey ?? "" }
+        .onChange(of: provider.model) { if case .failed = test { test = .idle } }
         .task {
             if !provider.needsKey || !key.isEmpty { await loadModels(quiet: true) }
             // -aistShotPicker <query>: open the model list with that search (for screenshots).
             if let q = UserDefaults.standard.string(forKey: "aistShotPicker") {
                 ModelPicker.initialQuery = q
                 if models.isEmpty { await loadModels(quiet: true) }
+                if UserDefaults.standard.bool(forKey: "aistShotTest") { await runTest() }
                 try? await Task.sleep(for: .seconds(0.5))
                 pickingModel = true
             }
@@ -848,15 +872,18 @@ struct ProviderDetail: View {
         }
     }
 
+    /// "AI 接口返回错误 400：Invalid param: …" — the server's message out of a JSON error body (which may
+    /// arrive cut short), without the "[trace_id: …]" prefix.
     static func short(_ error: Error) -> String {
         let text = error.localizedDescription
-        // Pull "message" out of a JSON error body when there is one.
         if let start = text.firstIndex(of: "{"),
-           let json = try? JSONSerialization.jsonObject(with: Data(text[start...].utf8)) as? [String: Any] {
-            let err = json["error"] as? [String: Any]
-            if let msg = (err?["message"] as? String) ?? (json["message"] as? String) {
-                return String(text[..<start]) + msg
-            }
+           let re = try? NSRegularExpression(pattern: #""message"\s*:\s*"((?:[^"\\]|\\.)*)"#),
+           let m = re.firstMatch(in: text, range: NSRange(start..., in: text)),
+           let r = Range(m.range(at: 1), in: text) {
+            let msg = text[r]
+                .replacingOccurrences(of: #"\""#, with: "\"")
+                .replacingOccurrences(of: #"^\[trace_id:[^\]]*\]\s*"#, with: "", options: .regularExpression)
+            if !msg.isEmpty { return String(text[..<start]) + msg }
         }
         return String(text.prefix(160))
     }

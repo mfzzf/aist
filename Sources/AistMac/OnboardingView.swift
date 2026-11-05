@@ -212,6 +212,7 @@ private struct MeetingStep: View {
     @AppStorage(MeetingSettings.promptOnCallKey) private var promptOnCall = true
     @AppStorage(MeetingSettings.endOnHangUpKey) private var endOnHangUp = true
     @AppStorage(MeetingSettings.liveNotesKey) private var liveNotes = true
+    @AppStorage(MeetingSettings.afterModelKey) private var afterModel = ""
     @State private var hasAstraFlowKey = false
 
     var body: some View {
@@ -247,10 +248,19 @@ private struct MeetingStep: View {
             Section {
                 Picker(selection: $engine) {
                     Text("本机（Apple）").tag(MeetingSettings.Engine.local.rawValue)
-                    Text("AstraFlow Gemini").tag(MeetingSettings.Engine.astraFlow.rawValue)
+                    Text("AstraFlow").tag(MeetingSettings.Engine.astraFlow.rawValue)
                 } label: {
                     Text("实时转写")
                     Text(engineNote)
+                }
+                if hasAstraFlowKey {
+                    Toggle(isOn: Binding(
+                        get: { !afterModel.isEmpty },
+                        set: { afterModel = $0 ? CloudFileTranscriber.Model.diarize.rawValue : "" }
+                    )) {
+                        Text("散会后用 AstraFlow 转写录音")
+                        Text("没开 AstraFlow 实时转写时生效，分得出不同说话人")
+                    }
                 }
                 Toggle(isOn: $liveNotes) {
                     Text("会中速记")

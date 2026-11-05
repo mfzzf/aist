@@ -29,6 +29,8 @@ final class LiveTranscript: ObservableObject {
     var onHeard: (() -> Void)?
 
     fileprivate var engine: AnyObject?
+    /// The last meeting was transcribed live by Gemini on AstraFlow (not on this Mac).
+    private(set) var usedCloud = false
 
     /// Lines without the microphone's echoes of the other side.
     var shownLines: [TranscriptSegment] { HeardText.removingEchoes(lines) }
@@ -44,10 +46,12 @@ final class LiveTranscript: ObservableObject {
     /// language for subtitles, or nil.
     func start(language: String, translateTo: Locale.Language?) {
         reset()
+        usedCloud = false
         if MeetingSettings.engine == .astraFlow {
             if let endpoint = CloudEndpoint.astraFlow() {
                 let engine = CloudEngine(owner: self, endpoint: endpoint, language: language, translateTo: translateTo)
                 self.engine = engine
+                usedCloud = true
                 isRunning = true
                 engine.start()
                 return
