@@ -148,7 +148,9 @@ struct AssistantTurn: View {
     static func displayed(_ all: [Part], live: Bool) -> [Displayed] {
         guard !live else { return all.map { .part($0) } }
         let steps = all.filter { if case .text = $0 { false } else { true } }
-        guard !steps.isEmpty else { return all.map { .part($0) } }
+        // Only thinking: it already is one folded line, folding it again would nest "思考过程" twice.
+        let onlyThinking = steps.allSatisfy { if case .thinking = $0 { true } else { false } }
+        guard !steps.isEmpty, !onlyThinking else { return all.map { .part($0) } }
         var out: [Displayed] = []
         var placed = false
         for p in all {
@@ -255,7 +257,7 @@ struct ActivitySummary<Row: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                withAnimation(.snappy(duration: 0.25)) { expanded.toggle() }
+                expanded.toggle()
             } label: {
                 HStack(spacing: 6) {
                     if hosts.isEmpty {
@@ -275,6 +277,7 @@ struct ActivitySummary<Row: View>: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .animation(.snappy(duration: 0.2), value: expanded)
                 }
                 .font(compact ? .caption : .callout)
                 .contentShape(Rectangle())
@@ -288,7 +291,6 @@ struct ActivitySummary<Row: View>: View {
                 .overlay(alignment: .leading) {
                     Rectangle().fill(.quaternary).frame(width: 1).offset(x: -1)
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
     }
@@ -473,7 +475,7 @@ struct StepRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button {
-                withAnimation(.snappy(duration: 0.2)) { expanded.toggle() }
+                expanded.toggle()
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: step.error != nil ? "exclamationmark.circle" : step.icon)
@@ -494,6 +496,7 @@ struct StepRow: View {
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.tertiary)
                                 .rotationEffect(.degrees(expanded ? 90 : 0))
+                                .animation(.snappy(duration: 0.2), value: expanded)
                         }
                     }
                 }
@@ -523,7 +526,6 @@ struct StepRow: View {
                 }
                 .font(.caption)
                 .padding(.leading, 22)
-                .transition(.opacity)
             }
         }
     }
@@ -540,7 +542,7 @@ struct ThinkingRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button {
-                withAnimation(.snappy(duration: 0.2)) { expanded.toggle() }
+                expanded.toggle()
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "brain").foregroundStyle(.secondary).frame(width: 16)
@@ -553,6 +555,7 @@ struct ThinkingRow: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .animation(.snappy(duration: 0.2), value: expanded)
                 }
                 .font(compact ? .caption : .callout)
                 .contentShape(Rectangle())
