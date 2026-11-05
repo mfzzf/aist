@@ -8,6 +8,7 @@ import Foundation
 public enum Api: String, Codable, Sendable, Hashable {
     case anthropicMessages = "anthropic-messages"
     case openaiCompletions = "openai-completions"
+    case openaiResponses = "openai-responses"
 }
 
 public enum InputKind: String, Codable, Sendable, Hashable { case text, image }
@@ -40,9 +41,13 @@ public struct Compat: Codable, Sendable, Hashable {
     public var hostedFetchType: String?
     /// OpenAI-compatible servers that stream reasoning as `delta.reasoning_content` and want it echoed back.
     public var reasoningContent = false
+    /// Responses servers that reason unless sent `reasoning: {effort: "none"}` (AstraFlow's DeepSeek).
+    public var reasoningEffortNone = false
 
     public init(sendThinkingDisabled: Bool = false, adaptiveThinking: Bool = false,
-                hostedSearchType: String? = nil, hostedFetchType: String? = nil, reasoningContent: Bool = false) {
+                hostedSearchType: String? = nil, hostedFetchType: String? = nil, reasoningContent: Bool = false,
+                reasoningEffortNone: Bool = false) {
+        self.reasoningEffortNone = reasoningEffortNone
         self.sendThinkingDisabled = sendThinkingDisabled
         self.adaptiveThinking = adaptiveThinking
         self.hostedSearchType = hostedSearchType

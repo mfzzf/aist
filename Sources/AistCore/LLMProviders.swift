@@ -6,6 +6,8 @@ public enum LLMFormat: String, Codable, Sendable, CaseIterable {
     case anthropic
     /// POST {baseURL}/chat/completions (OpenAI and everything OpenAI-compatible)
     case openai
+    /// POST {baseURL}/responses (OpenAI's Responses API; AstraFlow serves DeepSeek this way)
+    case responses
 }
 
 /// One model service. Built-ins ship with the app (the user only adds a key);
@@ -187,7 +189,7 @@ public enum LLMProviderStore {
     /// The provider's live model list (GET …/models), newest first when the server reports dates
     /// (OpenAI `created`, Anthropic `created_at`), otherwise in the server's order.
     public static func fetchModels(_ provider: LLMProvider, key: String?) async throws -> [LLMModelInfo] {
-        let bearer = provider.format == .openai || provider.modelsURL != nil
+        let bearer = provider.format != .anthropic || provider.modelsURL != nil
         let urlString = provider.modelsURL
             ?? provider.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + (bearer ? "/models" : "/v1/models?limit=1000")
         guard let url = URL(string: urlString) else { throw URLError(.badURL) }

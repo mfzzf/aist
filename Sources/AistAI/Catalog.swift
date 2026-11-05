@@ -40,6 +40,14 @@ public enum Catalog {
             if id.hasPrefix("gpt-4o") || id.hasPrefix("gpt-5") || id.contains("vl") || id.contains("vision") {
                 m.input = [.text, .image]
             }
+        case .openaiResponses:
+            // Thinks by default; `effort: none` turns it off (verified on AstraFlow 2026-11-05).
+            let deepseek = id.lowercased().contains("deepseek")
+            m.reasoning = deepseek || id.hasPrefix("gpt-5") || id.hasPrefix("o3") || id.hasPrefix("o4")
+            m.compat = Compat(reasoningEffortNone: deepseek || id.hasPrefix("gpt-5."))
+            if id.hasPrefix("gpt-4o") || id.hasPrefix("gpt-5") || id.contains("vl") || id.contains("vision") {
+                m.input = [.text, .image]
+            }
         }
 
         if let cost = prices[id] { m.cost = cost }

@@ -20,8 +20,9 @@ enum SettingsWindow {
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
             tabs.addTabViewItem(item)
         }
-        pane("通用", "gearshape", GeneralSettings(cloud: cloud, reminders: reminders, calendar: calendar, notifier: notifier, mailTodos: mailTodos))
-        pane("会议", "waveform", MeetingSettingsView())
+        pane("通用", "gearshape", GeneralSettings(cloud: cloud))
+        pane("通知", "bell.badge", NotifySettings(reminders: reminders, notifier: notifier, mailTodos: mailTodos))
+        pane("会议", "waveform", MeetingSettingsView(calendar: calendar))
         pane("连接", "link", ConnectionSettings(github: github, wecom: wecom))
         pane("AI", "sparkles", AISettings(), width: 700)
         pane("问答", "text.bubble", AgentSettingsView())
@@ -41,6 +42,8 @@ enum SettingsWindow {
 // MARK: - 会议
 
 private struct MeetingSettingsView: View {
+    @ObservedObject var calendar: CalendarCenter
+    @AppStorage(MeetingSettings.engineKey) private var engine = MeetingSettings.Engine.local.rawValue
     @AppStorage(MeetingSettings.languageKey) private var language = "auto"
     @AppStorage(MeetingSettings.translateToKey) private var translateTo = ""
     @AppStorage(MeetingSettings.liveNotesKey) private var liveNotes = true
@@ -53,6 +56,15 @@ private struct MeetingSettingsView: View {
     var body: some View {
         Form {
             Section {
+                Picker(selection: $engine) {
+                    Text("本机（Apple）").tag(MeetingSettings.Engine.local.rawValue)
+                    Text("AstraFlow Gemini").tag(MeetingSettings.Engine.astraFlow.rawValue)
+                } label: {
+                    Text("识别引擎")
+                    Text(engine == MeetingSettings.Engine.astraFlow.rawValue
+                         ? "声音发送到 AstraFlow 识别，用 设置 › AI 里的密钥和地域，按时长计费"
+                         : "在本机识别，声音不出电脑")
+                }
                 Picker("识别语言", selection: $language) {
                     ForEach(LiveTranscript.languageChoices, id: \.id) { Text($0.name).tag($0.id) }
                 }
@@ -66,10 +78,12 @@ private struct MeetingSettingsView: View {
             } header: {
                 Text("实时转写")
             } footer: {
-                if !LiveTranscript.isSupported {
-                    Text("实时转写需要 macOS 26；当前系统会在会议结束后转写。").foregroundStyle(.secondary)
+                if engine == MeetingSettings.Engine.astraFlow.rawValue {
+                    Text("Gemini 自动识别说话的语言；字幕翻译也由 AstraFlow 实时完成。只上传有人说话的片段。").foregroundStyle(.secondary)
+                } else if !LiveTranscript.isSupported {
+                    Text("本机实时转写需要 macOS 26；当前系统会在会议结束后转写。").foregroundStyle(.secondary)
                 } else {
-                    Text("在本机识别，声音不出电脑。「自动识别」会在中文、英文、马来语等已下载的语言里自动切换。").foregroundStyle(.secondary)
+                    Text("「自动识别」会在中文、英文、马来语等已下载的语言里自动切换。").foregroundStyle(.secondary)
                 }
             }
 
@@ -84,6 +98,16 @@ private struct MeetingSettingsView: View {
             }
 
             Section {
+                Toggle(isOn: Binding(
+                    get: { calendar.promptsToRecord && calendar.authorized },
+                    set: { on in
+                        calendar.promptsToRecord = on
+                        if on, !calendar.authorized { Task { await calendar.requestAccess() } }
+                    }
+                )) {
+                    Text("日程里的会议开始时提示录音")
+                    Text("开始前 1 分钟弹出提示")
+                }
                 Toggle(isOn: $promptOnCall) {
                     Text("会议软件开始通话时提示录音")
                     Text("腾讯会议、Zoom、飞书、Teams 等开始使用麦克风时")
@@ -164,10 +188,6 @@ private struct UpdateSection: View {
 
 private struct GeneralSettings: View {
     @ObservedObject var cloud: CloudSync
-    @ObservedObject var reminders: RemindersSync
-    @ObservedObject var calendar: CalendarCenter
-    @ObservedObject var notifier: EventNotifier
-    @ObservedObject var mailTodos: MailAutoTodo
     @AppStorage(UserIdentity.namesKey) private var myNames = ""
     @State private var hotkey = HotkeyManager.shared.current
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -183,7 +203,7 @@ private struct GeneralSettings: View {
                     }
                 } label: {
                     Text("截屏分析")
-                    Text("在任何地方按下，框选屏幕区域提取待办")
+                    Text("框选屏幕区域提取待办")
                 }
                 LabeledContent {
                     TextField("你的名字", text: $myNames, prompt: Text("张三, Alex"))
@@ -191,18 +211,15 @@ private struct GeneralSettings: View {
                         .frame(width: 180)
                 } label: {
                     Text("你的名字")
-                    Text("中英文名、昵称，用逗号分隔。AI 据此认出别人在 @ 你、在对你说话")
+                    Text("AI 据此认出别人在 @ 你")
                 }
-                Toggle(isOn: Binding(
+                Toggle("在程序坞中显示", isOn: Binding(
                     get: { UserDefaults.standard.bool(forKey: AppDelegate.showInDockKey) },
                     set: { on in
                         UserDefaults.standard.set(on, forKey: AppDelegate.showInDockKey)
                         AppDelegate.applyDockPolicy()
                     }
-                )) {
-                    Text("在程序坞中显示")
-                    Text("关闭后只在菜单栏显示")
-                }
+                ))
                 Toggle("登录时打开 Aist", isOn: Binding(
                     get: { launchAtLogin },
                     set: { on in
@@ -210,16 +227,70 @@ private struct GeneralSettings: View {
                         launchAtLogin = SMAppService.mainApp.status == .enabled
                     }
                 ))
-            }
-
-            Section("邮件") {
-                Toggle(isOn: $mailTodos.enabled) {
-                    Text("自动从新邮件里识别待办")
-                    Text("新邮件到达时由 AI 读一遍，发现需要你做的事就加入待办")
+                LabeledContent {
+                    HStack(spacing: 8) {
+                        if cloud.status == .syncing { ProgressView().controlSize(.small) }
+                        Text(cloud.statusText).foregroundStyle(.secondary)
+                        if cloud.isEnabled {
+                            Button("立即同步") { cloud.sync() }
+                                .disabled(cloud.status == .syncing)
+                        }
+                    }
+                } label: {
+                    Text("iCloud 同步")
+                    Text("和 iPhone 上的 Aist 共用一份待办")
                 }
             }
 
+            UpdateSection()
+
             Section {
+                LabeledContent {
+                    if screenOK {
+                        Label("已允许", systemImage: "checkmark.circle.fill")
+                            .labelStyle(.titleAndIcon)
+                            .foregroundStyle(.green)
+                    } else {
+                        Button("打开系统设置…") { ScreenCapturer.openPermissionSettings() }
+                    }
+                } label: {
+                    Text("屏幕录制权限")
+                    Text("截屏分析需要")
+                }
+                LabeledContent {
+                    Button("打开…") {
+                        NotificationCenter.default.post(name: Onboarding.showNotification, object: nil)
+                    }
+                } label: {
+                    Text("新手引导")
+                    Text("重新设置权限、AI 模型和自动化")
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollDisabled(true)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { screenOK = await ScreenCapturer.checkPermission() }
+        }
+        .task { screenOK = await ScreenCapturer.checkPermission() }
+    }
+}
+
+// MARK: - 通知
+
+/// Things Aist does on its own and tells you about: mail to-dos, Reminders, calendar alerts.
+private struct NotifySettings: View {
+    @ObservedObject var reminders: RemindersSync
+    @ObservedObject var notifier: EventNotifier
+    @ObservedObject var mailTodos: MailAutoTodo
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: $mailTodos.enabled) {
+                    Text("自动从新邮件里识别待办")
+                    Text("新邮件到达时由 AI 读一遍，需要你做的事加入待办")
+                }
                 Toggle(isOn: Binding(
                     get: { reminders.isEnabled },
                     set: { on in
@@ -229,24 +300,31 @@ private struct GeneralSettings: View {
                     Text("同步到「提醒事项」")
                     Text(remindersNote)
                 }
-                Toggle(isOn: Binding(
-                    get: { calendar.promptsToRecord && calendar.authorized },
-                    set: { on in
-                        calendar.promptsToRecord = on
-                        if on, !calendar.authorized { Task { await calendar.requestAccess() } }
+                if reminders.status == .denied {
+                    LabeledContent("提醒事项权限被关闭了") {
+                        Button("打开系统设置…") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders")!)
+                        }
                     }
-                )) {
-                    Text("会议开始时提醒录音")
-                    Text("日程里的会议开始前 1 分钟弹出提示")
                 }
             } header: {
-                Text("提醒事项与日历")
+                Text("待办")
             }
 
             Section {
                 Toggle("有新日程时通知", isOn: $notifier.notifyNew)
-                Toggle("开始前 15 分钟提醒", isOn: $notifier.remindBefore15)
-                Toggle("开始前 5 分钟提醒", isOn: $notifier.remindBefore5)
+                Picker("开始前提醒", selection: Binding(
+                    get: { (notifier.remindBefore15 ? 1 : 0) + (notifier.remindBefore5 ? 2 : 0) },
+                    set: { v in
+                        notifier.remindBefore15 = v & 1 != 0
+                        notifier.remindBefore5 = v & 2 != 0
+                    }
+                )) {
+                    Text("15 分钟和 5 分钟前").tag(3)
+                    Text("15 分钟前").tag(1)
+                    Text("5 分钟前").tag(2)
+                    Text("不提醒").tag(0)
+                }
             } header: {
                 Text("日程通知")
             } footer: {
@@ -260,68 +338,20 @@ private struct GeneralSettings: View {
                         .controlSize(.small)
                     }
                 } else {
-                    Text("包括企业微信和「日历」App 里的日程。企业微信每 2 分钟自动刷新一次。").foregroundStyle(.secondary)
-                }
-            }
-
-            Section {
-                LabeledContent {
-                    HStack(spacing: 8) {
-                        if cloud.status == .syncing { ProgressView().controlSize(.small) }
-                        Text(cloud.statusText).foregroundStyle(.secondary)
-                        if cloud.isEnabled {
-                            Button("立即同步") { cloud.sync() }
-                                .disabled(cloud.status == .syncing)
-                        }
-                    }
-                } label: {
-                    Text("iCloud 同步")
-                    Text("和 iPhone 上的 Aist 共用一份待办，存在你自己的 iCloud 里")
-                }
-            }
-
-            UpdateSection()
-
-            Section {
-                LabeledContent {
-                    Button("打开新手引导…") {
-                        NotificationCenter.default.post(name: Onboarding.showNotification, object: nil)
-                    }
-                } label: {
-                    Text("新手引导")
-                    Text("重新走一遍权限、AI 模型和自动化设置")
-                }
-            }
-
-            Section("权限") {
-                LabeledContent {
-                    if screenOK {
-                        Label("已允许", systemImage: "checkmark.circle.fill")
-                            .labelStyle(.titleAndIcon)
-                            .foregroundStyle(.green)
-                    } else {
-                        Button("打开系统设置…") { ScreenCapturer.openPermissionSettings() }
-                    }
-                } label: {
-                    Text("屏幕录制")
-                    Text("截屏分析需要这项权限")
+                    Text("包括企业微信和「日历」App 里的日程。").foregroundStyle(.secondary)
                 }
             }
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { screenOK = await ScreenCapturer.checkPermission() }
-        }
-        .task { screenOK = await ScreenCapturer.checkPermission() }
     }
 
     private var remindersNote: String {
         switch reminders.status {
         case let .on(list): "与「\(list)」列表双向同步，经 iCloud 到 iPhone 和 Apple Watch"
-        case .denied: "没有权限：系统设置 › 隐私与安全性 › 提醒事项"
+        case .denied: "没有权限"
         case let .failed(message): "同步出错：\(message)"
-        case .off: "待办出现在 iPhone 的「提醒事项」里，在哪边勾掉都会同步"
+        case .off: "待办出现在 iPhone 的「提醒事项」里，两边勾掉都会同步"
         }
     }
 }
@@ -611,6 +641,17 @@ struct ProviderDetail: View {
     let activate: () -> Void
     let remove: () -> Void
 
+    static func protocolName(_ p: LLMProvider) -> String {
+        let wire = p.format == .openai && LLMConfig.prefersResponses(host: URL(string: p.baseURL)?.host, model: p.model)
+            ? .responses : p.format
+        return switch wire {
+        case .anthropic: "Anthropic Messages 接口"
+        case .responses: "OpenAI Responses 接口"
+        case .openai:
+            p.id == "umodelverse" ? "OpenAI 兼容接口 · DeepSeek 走 Responses 接口" : "OpenAI 兼容接口"
+        }
+    }
+
     @State private var key = ""
     @State private var models: [LLMModelInfo] = []
     @State private var loadingModels = false
@@ -625,7 +666,7 @@ struct ProviderDetail: View {
                     ProviderLogo(provider: provider, size: 40)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(provider.name).font(.headline)
-                        Text(provider.format == .anthropic ? "Anthropic Messages 接口" : "OpenAI 兼容接口")
+                        Text(Self.protocolName(provider))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -644,6 +685,7 @@ struct ProviderDetail: View {
                     TextField("名称", text: $provider.name)
                     Picker("接口格式", selection: $provider.format) {
                         Text("OpenAI 兼容").tag(LLMFormat.openai)
+                        Text("OpenAI Responses").tag(LLMFormat.responses)
                         Text("Anthropic Messages").tag(LLMFormat.anthropic)
                     }
                 }
@@ -660,9 +702,12 @@ struct ProviderDetail: View {
                         Text(regions.first { $0.baseURL == provider.baseURL }.map { "\($0.detail) · \(URL(string: $0.baseURL)?.host ?? "")" } ?? provider.baseURL)
                     }
                 }
-                TextField("接口地址", text: $provider.baseURL)
-                    .textContentType(.URL)
-                    .autocorrectionDisabled()
+                // Region-based providers (AstraFlow) are fully set up: region, key, model.
+                if provider.regions == nil {
+                    TextField("接口地址", text: $provider.baseURL)
+                        .textContentType(.URL)
+                        .autocorrectionDisabled()
+                }
                 if provider.needsKey {
                     LabeledContent {
                         VStack(alignment: .trailing, spacing: 4) {

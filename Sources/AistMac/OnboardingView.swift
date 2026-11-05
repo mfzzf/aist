@@ -36,19 +36,22 @@ struct OnboardingView: View {
     @ObservedObject var wecom: WeComCenter
     var finish: () -> Void
     var addMailAccount: () -> Void
+    var initialStep = 0
 
     @State private var step = 0
     @AppStorage(UserIdentity.namesKey) private var myNames = ""
-    private let steps = ["欢迎", "权限", "AI 模型", "自动化"]
+    @ObservedObject private var updater = Updater.shared
+    private let steps = ["欢迎", "权限", "AI 模型", "自动化", "会议"]
 
     var body: some View {
         VStack(spacing: 0) {
             Group {
                 switch step {
                 case 0: welcome
-                case 1: PermissionsStep(calendar: calendar, notifier: notifier)
+                case 1: PermissionsStep(calendar: calendar, notifier: notifier, reminderSync: reminders)
                 case 2: ModelStep()
-                default: automationStep
+                case 3: automationStep
+                default: MeetingStep(calendar: calendar)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -81,6 +84,7 @@ struct OnboardingView: View {
             .padding(.vertical, 14)
         }
         .frame(width: 680, height: 560)
+        .onAppear { step = initialStep }
     }
 
     // MARK: Steps
@@ -125,6 +129,20 @@ struct OnboardingView: View {
                     Text("登录时打开 Aist")
                     Text("开机后自动在菜单栏待命，快捷键和提醒随时可用")
                 }
+                Toggle(isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: AppDelegate.showInDockKey) },
+                    set: { on in
+                        UserDefaults.standard.set(on, forKey: AppDelegate.showInDockKey)
+                        AppDelegate.applyDockPolicy()
+                    }
+                )) {
+                    Text("在程序坞中显示")
+                    Text("关闭后只在菜单栏显示")
+                }
+                Toggle(isOn: $updater.autoCheck) {
+                    Text("自动检查更新")
+                    Text("有新版本时提示你一键安装")
+                }
             } header: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("自动化").font(.title2.weight(.bold)).foregroundStyle(.primary)
@@ -163,12 +181,6 @@ struct OnboardingView: View {
                     Text("有新日程时、开始前 15 分钟和 5 分钟在右上角提醒")
                 }
                 Toggle(isOn: Binding(
-                    get: { calendar.promptsToRecord },
-                    set: { calendar.promptsToRecord = $0 }
-                )) {
-                    Text("会议开始时提醒录音")
-                }
-                Toggle(isOn: Binding(
                     get: { reminders.isEnabled },
                     set: { on in
                         if on { Task { await reminders.enable() } } else { reminders.disable() }
@@ -190,6 +202,74 @@ struct OnboardingView: View {
 
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Meeting recording: when to start and stop, and who transcribes.
+private struct MeetingStep: View {
+    @ObservedObject var calendar: CalendarCenter
+    @AppStorage(MeetingSettings.engineKey) private var engine = MeetingSettings.Engine.local.rawValue
+    @AppStorage(MeetingSettings.promptOnCallKey) private var promptOnCall = true
+    @AppStorage(MeetingSettings.endOnHangUpKey) private var endOnHangUp = true
+    @AppStorage(MeetingSettings.liveNotesKey) private var liveNotes = true
+    @State private var hasAstraFlowKey = false
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: Binding(
+                    get: { calendar.promptsToRecord },
+                    set: { on in
+                        calendar.promptsToRecord = on
+                        if on, !calendar.authorized { Task { await calendar.requestAccess() } }
+                    }
+                )) {
+                    Text("日程里的会议开始时提示录音")
+                    Text("开始前 1 分钟弹出提示")
+                }
+                Toggle(isOn: $promptOnCall) {
+                    Text("会议软件开始通话时提示录音")
+                    Text("腾讯会议、Zoom、飞书、Teams 等")
+                }
+                Toggle(isOn: $endOnHangUp) {
+                    Text("挂断后自动结束录音并生成纪要")
+                }
+            } header: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("会议").font(.title2.weight(.bold)).foregroundStyle(.primary)
+                    Text("录下会议，边开边出文字，结束后生成纪要和双方的待办。")
+                        .font(.body).foregroundStyle(.secondary)
+                }
+                .padding(.bottom, 8)
+                .textCase(nil)
+            }
+
+            Section {
+                Picker(selection: $engine) {
+                    Text("本机（Apple）").tag(MeetingSettings.Engine.local.rawValue)
+                    Text("AstraFlow Gemini").tag(MeetingSettings.Engine.astraFlow.rawValue)
+                } label: {
+                    Text("实时转写")
+                    Text(engineNote)
+                }
+                Toggle(isOn: $liveNotes) {
+                    Text("会中速记")
+                    Text("约每 45 秒更新一次要点和待办，会持续调用 AI")
+                }
+            } header: {
+                Text("转写")
+            }
+        }
+        .formStyle(.grouped)
+        .task { hasAstraFlowKey = CloudEndpoint.astraFlow() != nil }
+    }
+
+    private var engineNote: String {
+        if engine == MeetingSettings.Engine.astraFlow.rawValue {
+            return hasAstraFlowKey ? "声音发到 AstraFlow 识别，自动识别语言，可实时翻译字幕"
+                : "需要先在上一步「AI 模型」里填好 AstraFlow 密钥"
+        }
+        return LiveTranscript.isSupported ? "在本机识别，声音不出电脑" : "本机实时转写需要 macOS 26，否则会后转写"
     }
 }
 
@@ -243,6 +323,7 @@ private struct ConnectRow: View {
 private struct PermissionsStep: View {
     @ObservedObject var calendar: CalendarCenter
     @ObservedObject var notifier: EventNotifier
+    @ObservedObject var reminderSync: RemindersSync
 
     @State private var screen = ScreenCapturer.hasPermission
     @State private var notifications: UNAuthorizationStatus = .notDetermined
@@ -275,15 +356,15 @@ private struct PermissionsStep: View {
                 }
                 PermissionRow(symbol: "checklist", tint: .indigo, title: "提醒事项",
                               detail: "待办同步到 iPhone 的「提醒事项」",
-                              state: Self.state(reminders),
+                              state: reminderSync.accessGranted ? .granted : Self.state(reminders),
                               settings: "Privacy_Reminders") {
                     Task {
-                        _ = try? await EKEventStore().requestFullAccessToReminders()
-                        await refresh()
+                        // The answer, not authorizationStatus: that one stays stale after allowing.
+                        if !(await reminderSync.requestAccess()) { reminders = .denied }
                     }
                 }
                 PermissionRow(symbol: "mic", tint: .pink, title: "麦克风",
-                              detail: "会议录音，录音和转写只保存在这台 Mac 上",
+                              detail: "会议录音，录音只保存在这台 Mac 上",
                               state: Self.state(mic),
                               settings: "Privacy_Microphone") {
                     Task {
@@ -312,7 +393,8 @@ private struct PermissionsStep: View {
     private func refresh() async {
         screen = await ScreenCapturer.checkPermission()
         notifications = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
-        reminders = EKEventStore.authorizationStatus(for: .reminder)
+        let current = EKEventStore.authorizationStatus(for: .reminder)
+        if current != .notDetermined || reminders != .denied { reminders = current }
         mic = AVCaptureDevice.authorizationStatus(for: .audio)
     }
 

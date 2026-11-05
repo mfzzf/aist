@@ -21,6 +21,19 @@ public struct LLMConfig: Codable, Sendable {
         self.format = format
     }
 
+    /// The protocol actually spoken. AstraFlow's DeepSeek models go over the Responses API even
+    /// though the provider is set up as OpenAI-compatible (its Gemini models don't speak Responses).
+    public var wire: LLMFormat {
+        let f = format ?? .anthropic
+        if f == .openai, LLMConfig.prefersResponses(host: baseURL.host, model: model) { return .responses }
+        return f
+    }
+
+    public static func prefersResponses(host: String?, model: String) -> Bool {
+        let host = host ?? ""
+        return (host.hasSuffix("modelverse.cn") || host.hasSuffix("umodelverse.ai")) && model.lowercased().hasPrefix("deepseek")
+    }
+
     public static let keychainService = "com.aist.llm-api-key"
 
     /// macOS: ~/.config/aist/config.json (shared with aist-cli). iOS: the app's Application Support.

@@ -58,9 +58,10 @@ public struct LLMClient: Sendable {
         for mode in [ToolMode.forced, .auto, .none] {
             if mode == .forced, isAnthropicFirstParty { continue } // 400 on current Claude models
             do {
-                switch config.format ?? .anthropic {
+                switch config.wire {
                 case .anthropic: return try await anthropicTool(system: system, parts: parts, tool: tool, mode: mode, maxTokens: maxTokens)
                 case .openai: return try await openAITool(system: system, parts: parts, tool: tool, mode: mode, maxTokens: maxTokens)
+                case .responses: return try await responsesTool(system: system, parts: parts, tool: tool, mode: mode, maxTokens: maxTokens)
                 }
             } catch let ClientError.http(code, body) where code == 400 || code == 422 {
                 lastError = ClientError.http(code, body)
@@ -161,9 +162,10 @@ public struct LLMClient: Sendable {
     // MARK: - Plain text
 
     public func complete(system: String, parts: [Part], maxTokens: Int = 4000) async throws -> String {
-        switch config.format ?? .anthropic {
+        switch config.wire {
         case .anthropic: try await anthropic(system: system, parts: parts, maxTokens: maxTokens)
         case .openai: try await openAI(system: system, parts: parts, maxTokens: maxTokens)
+        case .responses: try responsesText(try await responses(system: system, parts: parts, tool: nil, mode: .none, maxTokens: maxTokens))
         }
     }
 
@@ -229,6 +231,59 @@ public struct LLMClient: Sendable {
         } else {
             (message?["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined()
         }
+        guard !text.isEmpty else { throw ClientError.emptyResponse }
+        return text
+    }
+
+    // MARK: - Responses API
+
+    private func responsesTool(system: String, parts: [Part], tool: Tool, mode: ToolMode, maxTokens: Int) async throws -> ToolResult {
+        let json = try await responses(system: system, parts: parts, tool: tool, mode: mode, maxTokens: maxTokens)
+        let output = json["output"] as? [[String: Any]] ?? []
+        if let call = output.first(where: { $0["type"] as? String == "function_call" && $0["name"] as? String == tool.name }),
+           let args = call["arguments"] as? String {
+            return .arguments(Data(args.utf8))
+        }
+        return .text(try responsesText(json))
+    }
+
+    private func responses(system: String, parts: [Part], tool: Tool?, mode: ToolMode, maxTokens: Int) async throws -> [String: Any] {
+        let content: [[String: Any]] = parts.map {
+            switch $0 {
+            case let .text(text):
+                return ["type": "input_text", "text": text]
+            case let .image(data, mediaType):
+                return ["type": "input_image", "image_url": "data:\(mediaType);base64,\(data.base64EncodedString())"]
+            }
+        }
+        var body: [String: Any] = [
+            "model": config.model,
+            "max_output_tokens": maxTokens,
+            "store": false,
+            "instructions": system,
+            "input": [["role": "user", "content": content]],
+        ]
+        // DeepSeek on AstraFlow thinks unless told not to (≈5 s per request).
+        if config.thinking != true, config.model.lowercased().contains("deepseek") { body["reasoning"] = ["effort": "none"] }
+        if let tool, mode != .none {
+            body["tools"] = [["type": "function", "name": tool.name, "description": tool.description,
+                              "parameters": tool.schemaObject]]
+            body["tool_choice"] = mode == .forced ? ["type": "function", "name": tool.name] : "auto"
+        }
+        var request = URLRequest(url: config.baseURL.appendingPathComponent("responses"))
+        if let key = config.apiKey, !key.isEmpty {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        return try await send(&request, body: body)
+    }
+
+    private func responsesText(_ json: [String: Any]) throws -> String {
+        let output = json["output"] as? [[String: Any]] ?? []
+        let text = output.filter { $0["type"] as? String == "message" }
+            .flatMap { $0["content"] as? [[String: Any]] ?? [] }
+            .filter { $0["type"] as? String == "output_text" }
+            .compactMap { $0["text"] as? String }
+            .joined()
         guard !text.isEmpty else { throw ClientError.emptyResponse }
         return text
     }

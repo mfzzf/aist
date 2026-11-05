@@ -14,13 +14,13 @@ import Translation
 @MainActor
 final class LiveTranscript: ObservableObject {
     /// Finished lines on the meeting timeline (seconds from the start of the recording), in order.
-    @Published fileprivate(set) var lines: [TranscriptSegment] = []
+    @Published var lines: [TranscriptSegment] = []
     /// The line in progress on each side.
-    @Published fileprivate(set) var drafts: [TranscriptSegment.Speaker: String] = [:]
+    @Published var drafts: [TranscriptSegment.Speaker: String] = [:]
     /// The language each side is being recognised in (display name).
-    @Published fileprivate(set) var languages: [TranscriptSegment.Speaker: String] = [:]
+    @Published var languages: [TranscriptSegment.Speaker: String] = [:]
     /// A model download, a fallback, an error: one short grey line.
-    @Published fileprivate(set) var status: String?
+    @Published var status: String?
     /// Subtitle translation is waiting for the user to download a language pair.
     @Published fileprivate(set) var translationNeedsDownload: (source: Locale.Language, target: Locale.Language)?
     @Published fileprivate(set) var isRunning = false
@@ -33,7 +33,9 @@ final class LiveTranscript: ObservableObject {
     /// Lines without the microphone's echoes of the other side.
     var shownLines: [TranscriptSegment] { HeardText.removingEchoes(lines) }
 
+    /// Live transcription works here: in the cloud (AstraFlow chosen and keyed) or on device (macOS 26+).
     static var isSupported: Bool {
+        if MeetingSettings.usesCloud { return true }
         if #available(macOS 26, *) { return SpeechTranscriber.isAvailable }
         return false
     }
@@ -42,6 +44,16 @@ final class LiveTranscript: ObservableObject {
     /// language for subtitles, or nil.
     func start(language: String, translateTo: Locale.Language?) {
         reset()
+        if MeetingSettings.engine == .astraFlow {
+            if let endpoint = CloudEndpoint.astraFlow() {
+                let engine = CloudEngine(owner: self, endpoint: endpoint, language: language, translateTo: translateTo)
+                self.engine = engine
+                isRunning = true
+                engine.start()
+                return
+            }
+            status = "AstraFlow 还没有填写密钥（设置 › AI），改用本机识别"
+        }
         guard #available(macOS 26, *), SpeechTranscriber.isAvailable else {
             status = "实时转写需要 macOS 26；结束后会在本机转写"
             return
@@ -55,6 +67,7 @@ final class LiveTranscript: ObservableObject {
     /// Audio from the recorder's queue. `lead`: seconds between the recording's start and this
     /// side's first sample.
     nonisolated func push(_ buffer: AVAudioPCMBuffer, speaker: TranscriptSegment.Speaker, lead: Double) {
+        CloudEngine.feed(buffer, speaker: speaker, lead: lead)
         guard #available(macOS 26, *) else { return }
         LiveEngine.feed(buffer, speaker: speaker, lead: lead)
     }
@@ -62,6 +75,13 @@ final class LiveTranscript: ObservableObject {
     /// Ends recognition and returns the finished transcript, or nil if live transcription didn't
     /// work (the recording is then transcribed from the files).
     func finish() async -> [TranscriptSegment]? {
+        if let cloud = engine as? CloudEngine {
+            let ok = await cloud.finish()
+            isRunning = false
+            drafts = [:]
+            self.engine = nil
+            return ok ? shownLines : nil
+        }
         guard #available(macOS 26, *), let engine = engine as? LiveEngine else { return nil }
         let ok = await engine.finish()
         isRunning = false
@@ -71,7 +91,10 @@ final class LiveTranscript: ObservableObject {
         return shownLines
     }
 
+    func simulateDrop() { (engine as? CloudEngine)?.simulateDrop() }
+
     func setTranslation(_ target: Locale.Language?) {
+        if let cloud = engine as? CloudEngine { cloud.setTranslation(target); return }
         guard #available(macOS 26, *), let engine = engine as? LiveEngine else { return }
         engine.setTranslation(target)
     }

@@ -20,6 +20,10 @@ final class RemindersSync: ObservableObject {
 
     @Published private(set) var status: Status = .off
     @Published private(set) var lastSync: Date?
+    /// Reminders access, as the last request answered. `EKEventStore.authorizationStatus(for: .reminder)`
+    /// stays at "not determined" in a running process after the user allows access (seen on macOS 27),
+    /// so it is only the starting guess; a request answers at once, without a prompt, once decided.
+    @Published private(set) var accessGranted = EKEventStore.authorizationStatus(for: .reminder) == .fullAccess
 
     private let ek: EKEventStore
     private let store: TodoStore
@@ -40,17 +44,22 @@ final class RemindersSync: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.schedule() }
             .store(in: &subscriptions)
-        if isEnabled, EKEventStore.authorizationStatus(for: .reminder) == .fullAccess { schedule(after: 0.5) }
+        if isEnabled {
+            Task { if await requestAccess() { schedule(after: 0.5) } else { status = .denied } }
+        }
+    }
+
+    /// Asks for full access (prompts only the first time) and remembers the answer.
+    @discardableResult
+    func requestAccess() async -> Bool {
+        let ok = (try? await ek.requestFullAccessToReminders()) ?? false
+        accessGranted = ok || EKEventStore.authorizationStatus(for: .reminder) == .fullAccess
+        return accessGranted
     }
 
     func enable() async {
-        do {
-            guard try await ek.requestFullAccessToReminders() else {
-                status = .denied
-                return
-            }
-        } catch {
-            status = .failed(error.localizedDescription)
+        guard await requestAccess() else {
+            status = .denied
             return
         }
         UserDefaults.standard.set(true, forKey: Self.enabledKey)
@@ -75,7 +84,7 @@ final class RemindersSync: ObservableObject {
 
     private func reconcile() async {
         guard isEnabled, !running else { return }
-        guard EKEventStore.authorizationStatus(for: .reminder) == .fullAccess else {
+        guard accessGranted || EKEventStore.authorizationStatus(for: .reminder) == .fullAccess else {
             status = .denied
             return
         }

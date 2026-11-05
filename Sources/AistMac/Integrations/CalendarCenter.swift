@@ -113,14 +113,18 @@ final class CalendarCenter: ObservableObject {
         reload()
     }
 
+    /// The request's answer counts, not just authorizationStatus, which can stay stale in a running
+    /// process after the user allows access.
+    private var granted = false
+
     func requestAccess() async {
-        authorized = (try? await ek.requestFullAccessToEvents()) ?? false
+        granted = (try? await ek.requestFullAccessToEvents()) ?? false
         reload()
     }
 
     /// Today through the next 14 days.
     func reload() {
-        authorized = EKEventStore.authorizationStatus(for: .event) == .fullAccess
+        authorized = granted || EKEventStore.authorizationStatus(for: .event) == .fullAccess
         guard authorized else {
             systemEvents = []
             merge()

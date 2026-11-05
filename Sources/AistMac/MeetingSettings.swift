@@ -10,6 +10,14 @@ enum MeetingSettings {
     static let promptOnCallKey = "meeting.promptOnCall"
     static let showLiveWindowKey = "meeting.showLiveWindow"
     static let shareLiveWindowKey = "meeting.shareLiveWindow"
+    static let engineKey = "meeting.engine"
+
+    enum Engine: String, CaseIterable {
+        /// Apple SpeechAnalyzer, on this Mac.
+        case local
+        /// Gemini on AstraFlow, with the key and region from 设置 › AI.
+        case astraFlow
+    }
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
@@ -21,6 +29,7 @@ enum MeetingSettings {
             promptOnCallKey: true,
             showLiveWindowKey: true,
             shareLiveWindowKey: false,
+            engineKey: Engine.local.rawValue,
         ])
     }
 
@@ -31,6 +40,13 @@ enum MeetingSettings {
         let id = UserDefaults.standard.string(forKey: translateToKey) ?? ""
         return id.isEmpty ? nil : Locale.Language(identifier: id)
     }
+
+    static var engine: Engine {
+        Engine(rawValue: UserDefaults.standard.string(forKey: engineKey) ?? "") ?? .local
+    }
+
+    /// Cheap enough for view bodies: a missing key is found (and reported) when the meeting starts.
+    static var usesCloud: Bool { engine == .astraFlow }
 
     static var liveNotes: Bool { UserDefaults.standard.bool(forKey: liveNotesKey) }
     static var endOnHangUp: Bool { UserDefaults.standard.bool(forKey: endOnHangUpKey) }

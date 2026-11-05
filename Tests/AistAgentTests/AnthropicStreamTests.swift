@@ -96,6 +96,62 @@ final class StreamParserTests: XCTestCase {
         XCTAssertEqual(b.message.usage.cacheRead, 20)
     }
 
+    func testResponsesReasoningTextAndTools() throws {
+        let m = Catalog.model(id: "deepseek-v4.1-flash", provider: "umodelverse", api: .openaiResponses,
+                              baseURL: URL(string: "https://api.modelverse.cn/v1")!)
+        var b = MessageBuilder(model: m)
+        var p = OpenAIResponses.StreamParser()
+        for l in [
+            #"{"type":"response.created","response":{"status":"in_progress"}}"#,
+            #"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}"#,
+            #"{"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"想一想"}"#,
+            #"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning"}}"#,
+            #"{"type":"response.output_item.added","output_index":1,"item":{"type":"message","role":"assistant"}}"#,
+            #"{"type":"response.output_text.delta","output_index":1,"delta":"好"}"#,
+            #"{"type":"response.output_text.delta","output_index":1,"delta":"的"}"#,
+            #"{"type":"response.output_item.done","output_index":1,"item":{"type":"message"}}"#,
+            #"{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","call_id":"call_a","name":"web_search","arguments":""}}"#,
+            #"{"type":"response.function_call_arguments.delta","output_index":2,"delta":"{\"qu"}"#,
+            #"{"type":"response.function_call_arguments.delta","output_index":2,"delta":"ery\":\"示例\"}"}"#,
+            #"{"type":"response.function_call_arguments.done","output_index":2,"arguments":"{\"query\":\"示例\"}"}"#,
+            #"{"type":"response.output_item.added","output_index":3,"item":{"type":"function_call","call_id":"call_b","name":"web_search"}}"#,
+            #"{"type":"response.function_call_arguments.done","output_index":3,"arguments":"{\"query\":\"二\"}"}"#,
+            #"{"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","call_id":"call_a","name":"web_search"}}"#,
+            #"{"type":"response.output_item.done","output_index":3,"item":{"type":"function_call","call_id":"call_b","name":"web_search"}}"#,
+            #"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":50,"output_tokens":7,"input_tokens_details":{"cached_tokens":20}}}}"#,
+        ] { _ = try p.handle(SSE.object(l)!, &b) }
+        _ = p.close(&b)
+        XCTAssertEqual(p.stopReason, .toolUse)
+        XCTAssertEqual(b.message.content.count, 4)
+        if case let .thinking(t, _) = b.message.content[0] { XCTAssertEqual(t, "想一想") } else { XCTFail() }
+        XCTAssertEqual(b.message.text, "好的")
+        XCTAssertEqual(b.message.toolCalls.map(\.id), ["call_a", "call_b"])
+        XCTAssertEqual(b.message.toolCalls.first?.arguments["query"]?.stringValue, "示例")
+        XCTAssertEqual(b.message.toolCalls.last?.arguments["query"]?.stringValue, "二")
+        XCTAssertEqual(b.message.usage.input, 30)
+        XCTAssertEqual(b.message.usage.cacheRead, 20)
+    }
+
+    func testResponsesRequestBody() {
+        let m = Catalog.model(id: "deepseek-v4.1-flash", provider: "umodelverse", api: .openaiResponses,
+                              baseURL: URL(string: "https://api.modelverse.cn/v1")!)
+        var a = AssistantMessage(for: m)
+        a.content = [.thinking("t", signature: nil), .text("好"), .toolCall(ToolCall(id: "c1", name: "f", arguments: ["x": 1]))]
+        let ctx = Context(systemPrompt: "sys", messages: [
+            .user(UserMessage("问")), .assistant(a),
+            .toolResult(ToolResultMessage(toolCallId: "c1", toolName: "f", content: [.text("结果")])),
+        ])
+        let body = OpenAIResponses.requestBody(m, ctx, StreamOptions())
+        XCTAssertEqual(body["instructions"] as? String, "sys")
+        XCTAssertEqual((body["reasoning"] as? [String: Any])?["effort"] as? String, "none")
+        let input = body["input"] as? [[String: Any]] ?? []
+        XCTAssertEqual(input.map { $0["type"] as? String ?? $0["role"] as? String ?? "" },
+                       ["user", "message", "function_call", "function_call_output"])
+        XCTAssertEqual(input[3]["call_id"] as? String, "c1")
+        let thinking = OpenAIResponses.requestBody(m, ctx, StreamOptions(reasoning: .high))
+        XCTAssertEqual((thinking["reasoning"] as? [String: Any])?["effort"] as? String, "high")
+    }
+
     func testPartialJSON() {
         XCTAssertEqual(JSONValue.parsePartial(#"{"a": "b"#)["a"]?.stringValue, "b")
         XCTAssertEqual(JSONValue.parsePartial(#"{"a": [1, 2"#)["a"], .array([1, 2]))

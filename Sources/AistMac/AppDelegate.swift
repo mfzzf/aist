@@ -55,6 +55,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openFromLaunchArguments() {
         let args = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        // -aistShots <dir>: snapshot every Settings pane and the onboarding steps to <dir>, then quit.
+        if let dir = args["aistShots"] as? String {
+            Task { @MainActor [weak self] in await self?.shootWindows(into: dir) }
+            return
+        }
+        // -aistCloudTest <a.wav[,b.wav]>: play files as "others" (and "me") through the cloud engine,
+        // log lines to /tmp/aist-cloud.log, then quit.
+        if let files = args["aistCloudTest"] as? String {
+            Task { @MainActor in await CloudSelfTest.run(files.split(separator: ",").map(String.init)) }
+            return
+        }
         guard let pane = args["aistOpenPane"] as? String else { return }
         FileManager.default.createFile(atPath: "/tmp/aist-nav.log", contents: nil)
         NavTrace.file = FileHandle(forWritingAtPath: "/tmp/aist-nav.log")
@@ -821,7 +832,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuOnboarding() { showOnboarding() }
 
-    private func showOnboarding() {
+    private func shootWindows(into dir: String) async {
+        func shoot(_ window: NSWindow?, _ name: String) {
+            guard let view = window?.contentView?.superview ?? window?.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+        }
+        menuSettings()
+        if let tabs = settingsWindow?.contentViewController as? NSTabViewController {
+            for i in tabs.tabViewItems.indices {
+                tabs.selectedTabViewItemIndex = i
+                try? await Task.sleep(for: .seconds(1.5))
+                shoot(settingsWindow, "settings-\(i)")
+            }
+        }
+        settingsWindow?.close()
+        for step in [1, 3, 4] {
+            onboardingWindow?.close()
+            onboardingWindow = nil
+            showOnboarding(step: step)
+            try? await Task.sleep(for: .seconds(1.5))
+            shoot(onboardingWindow, "onboarding-\(step)")
+        }
+        exit(0)
+    }
+
+    private func showOnboarding(step: Int = 0) {
         if onboardingWindow == nil {
             let view = OnboardingView(
                 calendar: calendar, reminders: reminders, notifier: notifier, mailTodos: mailTodos,
@@ -834,7 +871,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 addMailAccount: { [weak self] in
                     self?.mainWindow.show()
                     self?.mainWindow.model.addingAccount = true
-                }
+                },
+                initialStep: step
             )
             onboardingWindow = Onboarding.makeWindow(view)
         }

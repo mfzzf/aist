@@ -9,6 +9,7 @@ public enum ApiRegistry {
     nonisolated(unsafe) private static var table: [Api: StreamFunction] = [
         .anthropicMessages: { AnthropicMessages.stream($0, $1, $2) },
         .openaiCompletions: { OpenAICompletions.stream($0, $1, $2) },
+        .openaiResponses: { OpenAIResponses.stream($0, $1, $2) },
     ]
 
     public static func register(_ api: Api, _ fn: @escaping StreamFunction) {
