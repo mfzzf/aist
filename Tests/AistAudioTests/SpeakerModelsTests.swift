@@ -19,7 +19,7 @@ import Testing
 
     // Every source serves them by path under one address, over HTTPS; the original comes first.
     let sources = SpeakerModels.sources
-    #expect(sources.first?.name == "Hugging Face" && sources.contains { $0.name == "hf-mirror.com" })
+    #expect(sources.map(\.name) == ["Hugging Face", "hf-mirror.com", "ModelScope"])
     #expect(sources.allSatisfy { $0.base.hasPrefix("https://") && $0.base.hasSuffix("/") })
     #expect(Set(sources.map(\.base)).count == sources.count)
 

@@ -256,9 +256,12 @@ func runModels(_ args: [String]) async throws {
     }
     guard args.contains("--fetch") else { return }
     // --into <folder>: somewhere else than where the app keeps them, to try a download from scratch.
+    // --from <source name>: from that source only.
     let into = args.firstIndex(of: "--into").flatMap { $0 + 1 < args.count ? URL(fileURLWithPath: args[$0 + 1]) : nil }
+    let only = args.firstIndex(of: "--from").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
     let started = Date()
-    let used = try await SpeakerModels.fetch(into: into ?? SpeakerModels.directory)
+    let used = try await SpeakerModels.fetch(into: into ?? SpeakerModels.directory,
+                                             from: SpeakerModels.sources.filter { only == nil || $0.name == only })
     print(used.isEmpty ? "nothing to fetch" : String(format: "fetched in %.1f s; complete: %@", Date().timeIntervalSince(started),
                                                      SpeakerModels.isReady(in: into ?? SpeakerModels.directory) ? "yes" : "no"))
 }

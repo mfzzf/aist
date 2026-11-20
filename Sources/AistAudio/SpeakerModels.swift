@@ -59,9 +59,9 @@ public enum SpeakerModels {
         let base: String
     }
 
-    /// A copy on ModelScope ("owner/repository"), for where Hugging Face is slow or blocked; nil
-    /// until one is published.
-    static let modelScope: String? = nil
+    /// An unmodified copy of the same files on ModelScope ("owner/repository"), for networks where
+    /// Hugging Face is slow or blocked.
+    static let modelScope: String? = "Mzzf0829/speaker-diarization-coreml"
 
     public static let sources: [Source] = {
         let hub = "FluidInference/speaker-diarization-coreml/resolve/\(revision)/"

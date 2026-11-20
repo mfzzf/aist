@@ -28,5 +28,7 @@ The models that do it are downloaded on first use, not shipped with the app:
 a Core ML conversion by FluidInference of
 [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
 by pyannoteAI, licensed under Creative Commons Attribution 4.0 International
-(<https://creativecommons.org/licenses/by/4.0/>). Aist fetches the files unmodified, from Hugging Face
-or a mirror of it, and checks each against its SHA-256 (`Sources/AistAudio/SpeakerModels.swift`).
+(<https://creativecommons.org/licenses/by/4.0/>). Aist fetches the files unmodified from Hugging Face,
+hf-mirror.com, or an unmodified copy on ModelScope
+([Mzzf0829/speaker-diarization-coreml](https://www.modelscope.cn/models/Mzzf0829/speaker-diarization-coreml)),
+whichever answers fastest, and checks each against its SHA-256 (`Sources/AistAudio/SpeakerModels.swift`).

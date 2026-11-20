@@ -78,7 +78,7 @@ AI 输出统一走 JSON Schema 工具调用（function calling），不支持的
 - 待办、会议、录音、转写都只保存在这台 Mac：`~/Library/Application Support/aist/`
 - API Key、GitHub Token、邮箱密码保存在「钥匙串」
 - 会议转写默认在本机完成（打开 AstraFlow 实时转写或会后转写时，有人说话的片段会发到 AstraFlow）；发送给 AI 服务商的只有截图、邮件正文或转写文本本身
-- 区分说话人在本机完成，录音不会为此上传；记住的声纹只存在这台 Mac（`voicebook.json`，不同步、不导出），可在 设置 › 会议 里逐个或全部忘记。首次使用会下载约 22 MB 的模型，自动从 Hugging Face 及其镜像里选最快的，并逐个文件校验
+- 区分说话人在本机完成，录音不会为此上传；记住的声纹只存在这台 Mac（`voicebook.json`，不同步、不导出），可在 设置 › 会议 里逐个或全部忘记。首次使用会下载约 22 MB 的模型，自动从 Hugging Face、hf-mirror.com、ModelScope 里选最快的，并逐个文件校验
 - 删除会议时，原始录音移到废纸篓而不是直接销毁
 
 ## 从源码构建
