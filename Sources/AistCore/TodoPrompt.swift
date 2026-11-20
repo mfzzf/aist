@@ -219,7 +219,7 @@ public enum TodoPrompt {
         case .meeting:
             """
             ## 这次是会议转写
-            - 「我」是用户本人（麦克风），「对方」是电脑里传出的其他参会者声音。
+            - 每行开头是说话的人。「我」是用户本人；「对方」是电脑里传出的其他参会者，没分出是谁。录音里的声音被分开时，会写成「说话人A」「说话人B」……：同一个标签自始至终是同一个人的声音，已经知道名字的直接写名字。输入里的「说话人」一节列出了每个标签。
             - 转写是本机语音识别的结果，可能有错字，尤其是中文里夹的英文词（如 slides 被识别成 slight），按上下文还原。
             - 用户外放时，「我」的轨道里可能混入对方声音的回声，重复的内容只算一次。
             - 会上「我来」「我回头发你」「这个我跟一下」是用户的承诺；对方说「你这边……」「麻烦你……」是交代给用户的事。
@@ -228,11 +228,15 @@ public enum TodoPrompt {
             ## 结合会议信息理解转写
             输入里可能有这场会议的日程信息（来自系统日历或企业微信）：主题、组织者、参会人、地点、议程备注。转写只分得出「我」和「对方」，要靠这些信息补全：
             - 纠错：参会人姓名、项目名、产品名、术语以会议信息为准。转写里的同音字、近音词（「李莉」→ 参会人 Lily、「阿斯特拉」→ AstraFlow）按会议信息还原，纪要里写正确的。
-            - 认人：「对方」轨道可能是好几个人。根据以下线索推断每段话是谁说的：
+            - 认人：「对方」可能是好几个人；有「说话人A」这类标签时，要认的就是每个标签是谁。按对话的先后顺序和下面的线索推断：
               · 一对一会议（参会人只有用户和另一个人）：对方就是那个人。
-              · 点名与应答：「Lily 你那边呢？」之后接话的多半是 Lily；「我是…」「我这边…（部门/职责）」是自我介绍。
+              · 点名与应答：「Lily 你那边呢？」之后紧接着说话的多半是 Lily；「我是…」「我这边…（部门/职责）」是自我介绍。
+              · 被称呼与致谢：「谢谢 Lily」「Lily 说得对」指的是刚说完话的那个人。同一个标签被这样叫到几次，就可以确定。
               · 角色：组织者通常开场、主持、收尾；话题归属（谁负责哪块）也能帮助判断。
-              推断结果用在 others_todos 的 who、要点和决定的归属上；有明确依据就直接写名字，只是推测就写「Lily（推测）」，毫无线索就写「对方」，不要硬编。参会人名单里的用户本人不要当成对方。
+              · 排除法：参会人里只剩一个名字、标签也只剩一个没认出来时，可以推测是他，但只算推测。
+              · 标签和参会人的数量对不上是常事（有人没发言、有人没在名单里、一个人的声音被分成了两个标签）：不要为了凑齐硬配；两个标签确实是同一个人时，给它们同一个名字。
+              · 名字是用户确认的、按声音认出来的，直接采用，不要改。
+              推断结果用在 others_todos 的 who、议题内容和决定的归属上；有明确依据就直接写名字，只是推测就写「Lily（推测）」，毫无线索就写「对方」，不要硬编。参会人名单里的用户本人不要当成对方。
             - 议程：日程备注里列了议题的，对照转写看哪些谈了；列了却没谈到的，放进 open_questions。
             - 会议主题、地点等信息只作背景，不要在纪要里复述。
             - 没有会议信息时，就只按转写内容判断。
@@ -284,20 +288,30 @@ public enum TodoPrompt {
         description: "提交会议纪要和用户本人的待办。没有的项给空数组。",
         schema: """
             {"type": "object", "additionalProperties": false,
-             "required": ["analysis", "speakers", "title", "overview", "key_points", "key_point_at", "decisions", "decision_at", "open_questions", "my_todos", "others_todos", "terms"],
+             "required": ["analysis", "speakers", "me_voice", "title", "overview", "topics", "decisions", "decision_at", "open_questions", "my_todos", "others_todos", "terms"],
              "properties": {
                "analysis": {"type": "string", "description": "1～3 句：谁主导、谈了什么、哪些事落在用户身上"},
                "speakers": {"type": "array", "description": "除用户外实际发言的人，按会议信息推断", "items": {"type": "object", "additionalProperties": false,
-                 "required": ["name", "said", "certain"],
-                 "properties": {"name": {"type": "string", "description": "参会人名单里的名字；认不出是谁就写「对方」或「对方 A」"},
+                 "required": ["voice", "name", "said", "certain", "basis"],
+                 "properties": {"voice": {"type": ["string", "null"], "description": "转写里这个人的标签字母（「说话人A」填 A）；没有这类标签、或转写里已经写着名字的为 null"},
+                                "name": {"type": "string", "description": "参会人名单里的名字；认不出是谁就照写标签（「说话人A」），没有标签就写「对方」"},
                                 "said": {"type": "string", "description": "一句话：他在会上主要讲了什么、扮演什么角色"},
-                                "certain": {"type": "boolean", "description": "有明确依据（被点名、自我介绍、一对一会议）为 true；靠话题推测为 false"}}}},
+                                "certain": {"type": "boolean", "description": "有明确依据（被点名、自我介绍、一对一会议）为 true；靠话题、排除法推测为 false"},
+                                "basis": {"type": ["string", "null"], "description": "一句话：凭什么认出是他（谁在什么时候叫了他、他怎么介绍自己）；没认出来为 null"}}}},
+               "me_voice": {"type": ["string", "null"], "description": "「说话人」一节注明麦克风上有几个人、还不知道哪个是用户时：用户本人的标签字母，看不出来为 null。其余情况为 null"},
                "title": {"type": "string", "description": "会议主题，不超过 16 字"},
-               "overview": {"type": "string", "description": "两三句话的概要"},
-               "key_points": {"type": "array", "items": {"type": "string"}},
-               "key_point_at": {"type": "array", "description": "与 key_points 一一对应：最能支撑该要点的那句转写的时间戳（照抄 [mm:ss] 里的 mm:ss），找不到给 null", "items": {"type": ["string", "null"]}},
+               "overview": {"type": "string", "description": "3～5 句的概要：为什么开、谈成了什么、接下来做什么"},
+               "topics": {"type": "array", "description": "按时间顺序的议题：会上集中讨论的一件事算一个", "items": {"type": "object", "additionalProperties": false,
+                 "required": ["title", "at", "points", "conclusion"],
+                 "properties": {"title": {"type": "string", "description": "议题名，不超过 14 字"},
+                                "at": {"type": ["string", "null"], "description": "开始谈这个议题的那句转写的时间戳（照抄 [mm:ss] 里的 mm:ss），找不到给 null"},
+                                "points": {"type": "array", "description": "这个议题下的讨论内容，按发言顺序", "items": {"type": "object", "additionalProperties": false,
+                                  "required": ["text", "at"],
+                                  "properties": {"text": {"type": "string", "description": "一条讨论内容：谁提出了什么、依据或数字、别人怎么回应"},
+                                                 "at": {"type": ["string", "null"], "description": "最能支撑这条的那句转写的时间戳 mm:ss，找不到给 null"}}}},
+                                "conclusion": {"type": ["string", "null"], "description": "这个议题最后的结论；没谈出结论为 null"}}}},
                "decisions": {"type": "array", "items": {"type": "string"}},
-               "decision_at": {"type": "array", "description": "与 decisions 一一对应，同上", "items": {"type": ["string", "null"]}},
+               "decision_at": {"type": "array", "description": "与 decisions 一一对应：最能支撑该决定的那句转写的时间戳（照抄 [mm:ss] 里的 mm:ss），找不到给 null", "items": {"type": ["string", "null"]}},
                "open_questions": {"type": "array", "items": {"type": "string"}},
                "my_todos": {"type": "array", "items": \(todoItemSchema)},
                "others_todos": {"type": "array", "items": {"type": "object", "additionalProperties": false,

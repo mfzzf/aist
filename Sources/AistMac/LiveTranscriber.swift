@@ -1,3 +1,4 @@
+import AistAudio
 import AistCore
 import AVFoundation
 import CoreMedia
@@ -32,8 +33,13 @@ final class LiveTranscript: ObservableObject {
     /// The last meeting was transcribed live by Gemini on AstraFlow (not on this Mac).
     private(set) var usedCloud = false
 
-    /// Lines without the microphone's echoes of the other side.
-    var shownLines: [TranscriptSegment] { HeardText.removingEchoes(lines) }
+    /// What the microphone has held so far, moment by moment: the other side through the speakers,
+    /// or the user. Fed by the recorder alongside the transcribers.
+    nonisolated let echo = LiveEchoMeter()
+
+    /// Lines without the microphone's echoes of the other side: by the audio measured so far, and by
+    /// the words where it has nothing to say yet. (Afterwards the whole recording decides.)
+    var shownLines: [TranscriptSegment] { EchoFilter.marked(lines, profile: echo.profile, whole: false).spoken }
 
     /// Live transcription works here: in the cloud (AstraFlow chosen and keyed) or on device (macOS 26+).
     static var isSupported: Bool {
@@ -77,14 +83,15 @@ final class LiveTranscript: ObservableObject {
     }
 
     /// Ends recognition and returns the finished transcript, or nil if live transcription didn't
-    /// work (the recording is then transcribed from the files).
+    /// work (the recording is then transcribed from the files). Every line heard, the microphone's
+    /// echoes included: they are marked from the audio afterwards, not dropped here on their words.
     func finish() async -> [TranscriptSegment]? {
         if let cloud = engine as? CloudEngine {
             let ok = await cloud.finish()
             isRunning = false
             drafts = [:]
             self.engine = nil
-            return ok ? shownLines : nil
+            return ok ? lines : nil
         }
         guard #available(macOS 26, *), let engine = engine as? LiveEngine else { return nil }
         let ok = await engine.finish()
@@ -92,7 +99,7 @@ final class LiveTranscript: ObservableObject {
         drafts = [:]
         self.engine = nil
         guard ok else { return nil }
-        return shownLines
+        return lines
     }
 
     func simulateDrop() { (engine as? CloudEngine)?.simulateDrop() }
@@ -111,6 +118,7 @@ final class LiveTranscript: ObservableObject {
     }
 
     func reset() {
+        echo.reset()
         lines = []
         drafts = [:]
         languages = [:]

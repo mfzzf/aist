@@ -129,6 +129,10 @@ final class CaptureSink: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked 
     /// transcript's 0 is whichever side started first (same as the files' alignment).
     private var firstTime: Double?
     private var leads: [TranscriptSegment.Speaker: Double] = [:]
+    /// Where each side's next buffer should start, and the time the capture skipped instead (a file
+    /// has no room for a skipped stretch: what follows it lands early, out of step with the other track).
+    private var expected: [TranscriptSegment.Speaker: Double] = [:]
+    private var skipped: [TranscriptSegment.Speaker: (count: Int, seconds: Double)] = [:]
 
     init(folder: URL, live: LiveTranscript) {
         system = AudioFileWriter(url: folder.appendingPathComponent("system.m4a"))
@@ -151,7 +155,15 @@ final class CaptureSink: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked 
         let t = CMTimeGetSeconds(buffer.presentationTimeStamp)
         if firstTime == nil { firstTime = t }
         if leads[speaker] == nil { leads[speaker] = t - (firstTime ?? t) }
-        if let pcm = Self.pcm(buffer) { live.push(pcm, speaker: speaker, lead: leads[speaker] ?? 0) }
+        if let due = expected[speaker], t - due > 0.02 {
+            let so = skipped[speaker] ?? (0, 0)
+            skipped[speaker] = (so.count + 1, so.seconds + t - due)
+        }
+        expected[speaker] = t + CMTimeGetSeconds(buffer.duration)
+        if let pcm = Self.pcm(buffer) {
+            live.push(pcm, speaker: speaker, lead: leads[speaker] ?? 0)
+            live.echo.push(pcm, speaker: speaker, at: t - (firstTime ?? t))
+        }
     }
 
     /// The sample buffer's audio as an AVAudioPCMBuffer (copied: the capture buffer is reused).
@@ -173,6 +185,15 @@ final class CaptureSink: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked 
     func finish() async -> (system: AudioFileWriter.Result, mic: AudioFileWriter.Result) {
         // Let any buffers already queued land before closing the files.
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in queue.async { c.resume() } }
+        // Audio that never reached a file puts the two tracks out of step from there on: say so.
+        for (speaker, name, writer) in [(TranscriptSegment.Speaker.others, "system", system), (.me, "mic", mic)] {
+            if let gap = skipped[speaker] {
+                NSLog("aist: capture skipped %d stretches (%.2f s) of %@ audio", gap.count, gap.seconds, name)
+            }
+            if writer.dropped.count > 0 {
+                NSLog("aist: %@.m4a wasn't ready for %d buffers (%.2f s), dropped", name, writer.dropped.count, writer.dropped.seconds)
+            }
+        }
         async let s = system.finish()
         async let m = mic.finish()
         return await (s, m)
@@ -195,9 +216,16 @@ final class AudioFileWriter: @unchecked Sendable {
 
     init(url: URL) { self.url = url }
 
+    /// Buffers the encoder wasn't ready for, and the audio they held.
+    private(set) var dropped: (count: Int, seconds: Double) = (0, 0)
+
     func append(_ buffer: CMSampleBuffer) {
         if writer == nil { setUp(with: buffer) }
-        guard let writer, let input, writer.status == .writing, input.isReadyForMoreMediaData else { return }
+        guard let writer, let input, writer.status == .writing else { return }
+        guard input.isReadyForMoreMediaData else {
+            dropped = (dropped.count + 1, dropped.seconds + CMTimeGetSeconds(buffer.duration))
+            return
+        }
         input.append(buffer)
     }
 

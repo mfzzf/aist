@@ -1,4 +1,5 @@
 import AistAgentUI
+import AistAudio
 import AistCore
 import AppKit
 import Combine
@@ -59,6 +60,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // -aistShots <dir>: snapshot every Settings pane and the onboarding steps to <dir>, then quit.
         if let dir = args["aistShots"] as? String {
             Task { @MainActor [weak self] in await self?.shootWindows(into: dir) }
+            return
+        }
+        // -aistMeetingShot <dir>: the meeting detail on an invented meeting, as PNGs in <dir>, then quit.
+        if let dir = args["aistMeetingShot"] as? String {
+            Task { @MainActor [recorder, player] in
+                await MeetingDetailDemo.shoot(into: dir, recorder: recorder, player: player)
+                exit(0)
+            }
             return
         }
         // -aistCloudTest <a.wav[,b.wav]>: play files as "others" (and "me") through the cloud engine,
@@ -233,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             startMeeting: { [weak self] in Task { await self?.startMeeting() } },
             stopMeeting: { [weak self] in Task { await self?.stopMeeting() } },
             retryMeeting: { [weak self] id in Task { await self?.process(id) } },
-            emailMinutes: { [weak self] id in self?.emailMinutes(id) },
+            emailMinutes: { [weak self] id, version in self?.emailMinutes(id, version: version) },
             showLive: { [weak self] in self?.liveWindow.show() },
             recordEvent: { [weak self] event in Task { await self?.startMeeting(for: event) } }
         )
@@ -433,7 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         await process(id, fallback: transcribeAfter ? heard : nil)
     }
 
-    /// Transcribe (once) and summarize; also used for "重试 / 重新生成纪要". `fallback`: the live
+    /// Transcribe (once) and summarize; also used for "重试 / 重新分析整理". `fallback`: the live
     /// transcript, kept if transcribing the files fails.
     private func process(_ id: UUID, fallback: [TranscriptSegment]? = nil) async {
         guard let meeting = meetings.meeting(id), let recording = meeting.recording, meeting.status != .recording else { return }
@@ -455,6 +464,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 transcript = segments
                 meetings.update(id) { $0.transcript = segments }
             }
+            // From the two tracks themselves, so it holds whoever transcribed them, and again on every
+            // re-run: which microphone lines are only the other side through the speakers, and whose
+            // voice each line is.
+            if let lines = transcript, !lines.isEmpty {
+                meetings.update(id) {
+                    $0.status = .summarizing
+                    $0.error = nil
+                }
+                let before = meetings.meeting(id)
+                let heard = await Self.listen(lines, recording: recording, separate: MeetingSettings.separateVoices,
+                                              remember: MeetingSettings.rememberVoices,
+                                              known: before?.voices, invited: before?.attendees?.count)
+                if heard.lines != lines || heard.voices != before?.voices {
+                    meetings.update(id) {
+                        $0.transcript = heard.lines
+                        $0.voices = heard.voices
+                    }
+                }
+                transcript = heard.lines
+            }
             guard let transcript, !transcript.isEmpty else {
                 meetings.update(id) {
                     $0.status = .failed
@@ -473,7 +502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let current = meetings.meeting(id) ?? meeting
             let out = try await MeetingSummarizer(client: LLMClient(config: config), identity: UserIdentity.names,
                                                   background: UserIdentity.background).summarize(
-                transcript: transcript, startedAt: current.startedAt,
+                transcript: transcript, voices: current.voices, startedAt: current.startedAt,
                 existing: store.openItems, notes: current.notes,
                 calendar: calendarContext(for: current)
             )
@@ -485,9 +514,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let result = store.apply(todos, origin: .meeting, meetingID: id)
             let linked = result.added + result.updated
+            // The names the minutes worked out for the voices go onto the voices, and each speaker
+            // in the minutes remembers which voice it is.
+            var summary = out.summary
+            var voices = meetings.meeting(id)?.voices
+            if let known = voices, let speakers = summary.speakers {
+                let named = SpeakerLabels.apply(speakers, meVoice: out.meVoice, to: known)
+                voices = named.voices
+                for i in speakers.indices { summary.speakers?[i].voice = named.ids[i] }
+            }
             meetings.update(id) {
-                $0.title = title
-                $0.summary = out.summary
+                $0.voices = voices
+                // The minutes this replaces stay in the meeting's history.
+                $0.replaceSummary(summary, title: title)
                 var ids = $0.todoIDs ?? []
                 for t in linked where !ids.contains(t) { ids.append(t) }
                 $0.todoIDs = ids.isEmpty ? nil : ids
@@ -510,6 +549,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             overlay.show(message: "会议处理失败：\(error.localizedDescription)", isError: true, for: 6,
                          target: .init(pane: .meetings, id: id))
         }
+    }
+
+    /// What the recording's audio says about its transcript: the microphone's echoes of the other
+    /// side marked (see `EchoFilter`; when the audio can't be read the words alone decide, as before
+    /// there was a measurement), and, with `separate`, every line given its voice (`SpeakerPass`;
+    /// when that fails the lines and the voices stay as they were).
+    private nonisolated static func listen(_ lines: [TranscriptSegment], recording: TodoRecording, separate: Bool, remember: Bool,
+                                           known: [MeetingVoice]?, invited: Int?) async -> (lines: [TranscriptSegment], voices: [MeetingVoice]?) {
+        let folder = TodoStore.folder(for: recording.id)
+        var measured: RecordingEcho.Measured?
+        if recording.hasMicrophone, recording.hasSystemAudio {
+            measured = try? RecordingEcho.measure(folder: folder, micOffset: recording.micOffset ?? 0)
+        }
+        let marked = EchoFilter.marked(lines, profile: measured?.profile)
+        guard separate, let out = await SpeakerPass.run(
+            folder: folder, recording: recording, transcript: marked, echo: measured?.profile,
+            systemSilent: measured?.system.isSilent ?? false,
+            // Room for people who weren't on the invitation.
+            maxVoices: invited.map { $0 + 2 }, known: known, remember: remember
+        ) else { return (marked, known) }
+        return (out.transcript, out.voices)
     }
 
     /// The recording's transcript: on AstraFlow when 会后转写 is on (falling back to this Mac if
@@ -580,8 +640,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Opens a mail with the minutes and both sides' to-dos, addressed to the attendees.
-    private func emailMinutes(_ id: UUID) {
-        guard let m = meetings.meeting(id) else { return }
+    /// `version`: an earlier version of the minutes to send instead of the current ones.
+    private func emailMinutes(_ id: UUID, version: UUID? = nil) {
+        guard let m = meetings.meeting(id)?.showing(version: version) else { return }
         guard let account = mailAccounts.accounts.first else {
             overlay.show(message: "先在「邮件」里添加一个邮箱账户，才能发送纪要", isError: true, for: 6)
             return

@@ -133,8 +133,8 @@ import Testing
 
     let md = MeetingExport.markdown(m, myTodos: todos, myName: "李四")
     #expect(md.hasPrefix("# 项目 A 周会"))
-    #expect(md.contains("## 李四的待办\n\n- [ ] 准备环境（明天）"))
-    #expect(md.contains("- [ ] **Alice**：整理需求文档（周五）"))
+    // Everyone's to-dos in one list, the user's first; minutes from before topics keep their key points.
+    #expect(md.contains("## 待办\n\n- [ ] **李四**：准备环境（明天）\n- [ ] **Alice**：整理需求文档（周五）\n\n## 要点\n\n- 下月开始第二阶段"))
     #expect(md.contains("**[00:01] 对方**：We start phase two next month.  \n> 我们下个月开始第二阶段。"))
 
     let srt = MeetingExport.srt(m.transcript!)
@@ -144,6 +144,113 @@ import Testing
     let mail = MeetingExport.mailBody(m, myTodos: todos, myName: "李四")
     #expect(mail.contains("【待办】\n1. 李四：准备环境（明天）\n2. Alice：整理需求文档（周五）"))
     #expect(!mail.contains("We start phase two"))
+}
+
+@Test func minutesGoTopicByTopic() throws {
+    let out = try MeetingSummarizer.parse("""
+    {"title": "项目 A 周会", "overview": "定了分两期交付。",
+     "topics": [{"title": "交付排期", "at": "02:10",
+                 "points": [{"text": "张三认为月底上线有风险，测试只剩三天", "at": "02:31"}, "李四建议先交付核心模块"],
+                 "conclusion": "分两期交付"},
+                {"title": "报价", "at": null, "points": [{"text": "按新范围重算", "at": null}], "conclusion": " "},
+                {"title": "空议题", "at": "20:00", "points": [], "conclusion": null}],
+     "decisions": ["分两期交付"], "decision_at": ["09:45"], "open_questions": ["第二期验收标准谁来定"],
+     "my_todos": [], "others_todos": []}
+    """)
+    let topics = try #require(out.summary.topics)
+    // A topic with nothing under it is dropped; a blank conclusion is no conclusion.
+    #expect(topics.map(\.title) == ["交付排期", "报价"])
+    #expect(topics[0].time == 130)
+    #expect(topics[0].points.map(\.time) == [151, nil])
+    #expect(topics[0].points[1].text == "李四建议先交付核心模块")
+    #expect(topics[1].conclusion == nil)
+    #expect(out.summary.discussionText.contains("张三认为月底上线有风险，测试只剩三天"))
+    #expect(!out.isEmpty)
+    // Topics alone are minutes.
+    #expect(try !MeetingSummarizer.parse(#"{"topics": [{"title": "排期", "points": ["先做核心模块"]}]}"#).isEmpty)
+    // Broken topics don't cost the rest.
+    let broken = try MeetingSummarizer.parse(#"{"overview": "概要", "topics": "没有", "decisions": ["定了"]}"#)
+    #expect(broken.summary.topics == nil && broken.summary.decisions == ["定了"])
+
+    var m = Meeting(startedAt: Date(timeIntervalSince1970: 1_800_000_000))
+    m.title = out.title
+    m.summary = out.summary
+    let md = MeetingExport.markdown(m, myTodos: [], myName: "李四")
+    #expect(md.contains("## 议题\n\n### 1. 交付排期（02:10）\n\n- 张三认为月底上线有风险，测试只剩三天\n- 李四建议先交付核心模块\n- **结论**：分两期交付\n\n### 2. 报价\n\n- 按新范围重算\n\n## 决定"))
+    #expect(!md.contains("## 要点"))
+    let mail = MeetingExport.mailBody(m, myTodos: [], myName: "李四")
+    #expect(mail.contains("【议题】\n1. 交付排期\n   · 张三认为月底上线有风险，测试只剩三天\n   · 李四建议先交付核心模块\n   结论：分两期交付\n2. 报价\n   · 按新范围重算\n\n【决定】\n1. 分两期交付"))
+
+    // Survives the store's JSON round trip.
+    let back = try JSONDecoder().decode(MeetingSummary.self, from: JSONEncoder().encode(out.summary))
+    #expect(back == out.summary)
+}
+
+@Test func minutesPromptNamesTheUserAndAsksForTopics() {
+    let zone = TimeZone(identifier: "Asia/Kuala_Lumpur")!
+    let named = MeetingSummarizer.systemPrompt(identity: [" ", "李四"], now: Date(timeIntervalSince1970: 1_800_000_000), timeZone: zone)
+    #expect(named.contains("提到用户本人时写「李四」"))
+    #expect(named.contains("- topics：") && !named.contains("key_points"))
+    let unnamed = MeetingSummarizer.systemPrompt(identity: [], now: Date(timeIntervalSince1970: 1_800_000_000), timeZone: zone)
+    #expect(unnamed.contains("提到用户本人时写「我」"))
+    // The tool asks for what the prompt describes.
+    #expect(TodoPrompt.recordMinutes.schema.contains("\"topics\"") && !TodoPrompt.recordMinutes.schema.contains("key_points"))
+    #expect((try? JSONSerialization.jsonObject(with: Data(TodoPrompt.recordMinutes.schema.utf8))) != nil)
+}
+
+@Test func regeneratingKeepsEarlierMinutes() throws {
+    func minutes(_ overview: String) throws -> MeetingSummary {
+        try MeetingSummarizer.parse(#"{"overview": "\#(overview)", "decisions": ["定了"]}"#).summary
+    }
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    var m = Meeting(startedAt: start)
+    // The first minutes replace nothing.
+    m.replaceSummary(try minutes("第一版"), title: "周会", at: start.addingTimeInterval(1800))
+    #expect(m.summaryHistory == nil && m.summaryCreatedAt == start.addingTimeInterval(1800))
+    m.replaceSummary(try minutes("第二版"), title: "项目周会", at: start.addingTimeInterval(86400))
+    let first = try #require(m.summaryHistory?.first)
+    #expect(m.summaryHistory?.count == 1)
+    #expect(first.summary.overview == "第一版" && first.title == "周会" && first.createdAt == start.addingTimeInterval(1800))
+    #expect(m.summary?.overview == "第二版" && m.title == "项目周会")
+
+    // Reading the earlier version doesn't change the meeting.
+    let old = m.showing(version: first.id)
+    #expect(old.summary?.overview == "第一版" && old.title == "周会")
+    #expect(m.showing(version: nil) == m && m.showing(version: UUID()) == m)
+
+    // Restoring swaps the two.
+    m.restoreSummary(first.id)
+    #expect(m.summary?.overview == "第一版" && m.title == "周会")
+    #expect(m.summaryHistory?.map(\.summary.overview) == ["第二版"])
+    let second = try #require(m.summaryHistory?.first)
+    m.deleteSummaryVersion(second.id)
+    #expect(m.summaryHistory == nil && m.summary?.overview == "第一版")
+
+    // A title the user typed stays through regenerating and restoring.
+    m.title = "我起的名字"
+    m.titleEdited = true
+    m.replaceSummary(try minutes("第三版"), title: m.title)
+    m.restoreSummary(try #require(m.summaryHistory?.first?.id))
+    #expect(m.title == "我起的名字" && m.summary?.overview == "第一版")
+}
+
+@Test func meetingsFromBeforeVersionsStillLoad() throws {
+    // As an older build saved it: no topics, no history, no date on the minutes.
+    let json = """
+    [{"id": "6F9619FF-8B86-D011-B42D-00C04FC964FF", "title": "项目 A 周会", "startedAt": "2027-01-15T08:00:00Z",
+      "duration": 1800, "status": "ready",
+      "summary": {"overview": "定了第二阶段日期", "key_points": ["文档周三完成"], "key_point_at": ["00:23"],
+                  "decisions": [], "others_todos": [], "open_questions": []}}]
+    """
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    var m = try #require(try decoder.decode([Meeting].self, from: Data(json.utf8)).first)
+    #expect(m.summary?.topics == nil && m.summary?.keyPoints == ["文档周三完成"])
+    #expect(m.summaryHistory == nil && m.summaryCreatedAt == nil)
+    // Regenerating files the old minutes under the meeting's own start.
+    m.replaceSummary(try MeetingSummarizer.parse(#"{"topics": [{"title": "排期", "points": ["先做核心模块"]}]}"#).summary, title: m.title)
+    #expect(m.summaryHistory?.first?.createdAt == m.startedAt)
+    #expect(m.summaryHistory?.first?.summary.keyPoints == ["文档周三完成"])
 }
 
 @Test func liveNotesDecodeLeniently() throws {

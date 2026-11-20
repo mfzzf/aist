@@ -14,6 +14,11 @@ enum MeetingSettings {
     /// "" (off) or a `CloudFileTranscriber.Model`: transcribe the recording on AstraFlow after the
     /// meeting when Gemini didn't transcribe it live.
     static let afterModelKey = "meeting.afterModel"
+    /// Tell the voices in a recording apart (说话人A / 说话人B) after the meeting.
+    static let separateVoicesKey = "meeting.separateVoices"
+    /// Keep the voiceprints of the user and of people whose names they confirmed, to recognize them
+    /// in later meetings.
+    static let rememberVoicesKey = "meeting.rememberVoices"
 
     enum Engine: String, CaseIterable {
         /// Apple SpeechAnalyzer, on this Mac.
@@ -34,6 +39,8 @@ enum MeetingSettings {
             shareLiveWindowKey: false,
             engineKey: Engine.local.rawValue,
             afterModelKey: "",
+            separateVoicesKey: true,
+            rememberVoicesKey: true,
         ])
     }
 
@@ -57,6 +64,8 @@ enum MeetingSettings {
     }
 
     static var liveNotes: Bool { UserDefaults.standard.bool(forKey: liveNotesKey) }
+    static var separateVoices: Bool { UserDefaults.standard.bool(forKey: separateVoicesKey) }
+    static var rememberVoices: Bool { UserDefaults.standard.bool(forKey: rememberVoicesKey) }
     static var endOnHangUp: Bool { UserDefaults.standard.bool(forKey: endOnHangUpKey) }
     static var silenceMinutes: Int { UserDefaults.standard.integer(forKey: silenceMinutesKey) }
     static var promptOnCall: Bool { UserDefaults.standard.bool(forKey: promptOnCallKey) }

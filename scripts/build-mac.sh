@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds build/Aist.app from the SwiftPM targets and signs it.
+# Builds build/Aist.app (or $AIST_BUILD_DIR/Aist.app) from the SwiftPM targets and signs it.
 # A stable signing identity matters: macOS ties the screen-recording permission to the signature,
 # so ad-hoc builds would lose the permission on every rebuild.
 set -euo pipefail
@@ -18,8 +18,10 @@ swift build -c "$CONFIG" "${MAP[@]}" --product AistMac
 swift build -c "$CONFIG" "${MAP[@]}" --product aist-cli
 BIN=$(swift build -c "$CONFIG" "${MAP[@]}" --show-bin-path)
 
-APP=build/Aist.app
-rm -rf build/aist.app
+# AIST_BUILD_DIR: build somewhere else, e.g. a copy to try out while the app in build/ keeps running.
+OUT=${AIST_BUILD_DIR:-build}
+APP=$OUT/Aist.app
+rm -rf "$OUT/aist.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/AistMac" "$APP/Contents/MacOS/aist"
@@ -46,7 +48,7 @@ cp Resources/Mac/Info.plist "$APP/Contents/Info.plist"
 # dialogs) render in the user's locale instead of falling back to English.
 cp -R Resources/Mac/*.lproj "$APP/Contents/Resources/"
 cp -R Resources/Mac/ProviderIcons "$APP/Contents/Resources/"
-cp "$BIN/aist-cli" build/aist-cli
+cp "$BIN/aist-cli" "$OUT/aist-cli"
 
 # App icon: Resources/Mac/AppIcon.png (1024², already on the macOS icon grid) → AppIcon.icns
 ICONSET=$(mktemp -d)/AppIcon.iconset

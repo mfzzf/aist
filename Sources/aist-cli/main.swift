@@ -4,12 +4,17 @@ import Foundation
 // Usage: aist-cli ask "<question>" [--search …] [--then "<follow-up>"]   (see Ask.swift)
 //        aist-cli extract <image> [--app <front app name>] [--me "名字,别名"] [--background "<工作背景>"|@file]
 //        aist-cli email <file.txt> [--me ...]
-//        aist-cli meeting <transcript.txt> [--context <meeting-info.txt>]   (lines "我：…" / "对方：…")
+//        aist-cli meeting <transcript.txt> [--context <meeting-info.txt>] [--room]
+//            lines "我：…" / "对方：…", or "说话人A：…" for voices told apart (--room: at the microphone,
+//            the user among them, as in a meeting held in one room)
+//        aist-cli audio echo <recording folder>|--all [--lines]   (see Audio.swift)
+//        aist-cli audio voices <recording folder> [--max <n>]
+//        aist-cli audio models [--fetch]   (times the sources of the speaker models; --fetch downloads them)
 // Runs the same extraction the Mac app uses, without needing screen-recording permission.
 // For trying other providers: AIST_BASE_URL, AIST_MODEL, AIST_FORMAT (anthropic|openai), AIST_API_KEY.
 
 let args = CommandLine.arguments
-guard args.count >= 3, ["extract", "email", "chat", "meeting", "note", "assist", "ask"].contains(args[1]) else {
+guard args.count >= 3, ["extract", "email", "chat", "meeting", "note", "assist", "ask", "audio"].contains(args[1]) else {
     FileHandle.standardError.write(Data("usage: aist-cli extract <image> [--app <name>] | email|note <file>  [--me <names>]\n".utf8))
     exit(2)
 }
@@ -26,6 +31,16 @@ var frontApp: String?
 if let i = args.firstIndex(of: "--app"), i + 1 < args.count { frontApp = args[i + 1] }
 
 do {
+    if args[1] == "audio" {
+        if args[2] == "models" {
+            try await runModels(args)
+        } else if args[2] == "voices" {
+            try await runVoices(args)
+        } else {
+            try runAudio(args)
+        }
+        exit(0)
+    }
     let env = ProcessInfo.processInfo.environment
     var config: LLMConfig
     if let base = env["AIST_BASE_URL"], let url = URL(string: base) {
@@ -41,23 +56,46 @@ do {
     if args[1] == "meeting" {
         let lines = try String(contentsOfFile: args[2], encoding: .utf8).split(separator: "\n").map(String.init)
         var t = 0.0
+        let room = args.contains("--room")
+        var voices: [MeetingVoice] = []
+        var ids: [String: String] = [:]
         let segments = lines.compactMap { line -> TranscriptSegment? in
-            let mine = line.hasPrefix("我：")
-            guard mine || line.hasPrefix("对方：") else { return nil }
+            guard let colon = line.firstIndex(of: "：") else { return nil }
+            let who = String(line[..<colon])
+            guard who == "我" || who == "对方" || who.hasPrefix("说话人") else { return nil }
             t += 8
-            return TranscriptSegment(speaker: mine ? .me : .others, start: t, end: t + 7,
-                                     text: String(line.drop(while: { $0 != "：" }).dropFirst()))
+            var seg = TranscriptSegment(speaker: who == "我" || (room && who != "对方") ? .me : .others, start: t, end: t + 7,
+                                        text: String(line[line.index(after: colon)...]))
+            if who.hasPrefix("说话人") {
+                if ids[who] == nil {
+                    ids[who] = "\(room ? "m" : "s")\(ids.count + 1)"
+                    voices.append(MeetingVoice(id: ids[who]!, track: seg.speaker, speaking: 0, firstAt: t))
+                }
+                seg.voice = ids[who]
+                if let i = voices.firstIndex(where: { $0.id == ids[who] }) { voices[i].speaking += 60 }
+            }
+            return seg
         }
         var context: String?
         if let i = args.firstIndex(of: "--context"), i + 1 < args.count {
             context = try String(contentsOfFile: args[i + 1], encoding: .utf8)
         }
         let out = try await MeetingSummarizer(client: LLMClient(config: config), identity: me, background: background)
-            .summarize(transcript: segments, startedAt: .now, existing: [], notes: nil, calendar: context)
+            .summarize(transcript: segments, voices: voices.isEmpty ? nil : voices, startedAt: .now, existing: [], notes: nil, calendar: context)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
         print(String(decoding: try encoder.encode(out.summary), as: UTF8.self))
         print("title:", out.title)
+        if !voices.isEmpty {
+            let named = SpeakerLabels.apply(out.summary.speakers ?? [], meVoice: out.meVoice, to: voices)
+            let letters = SpeakerLabels.letters(voices)
+            for (before, after) in zip(voices, named.voices) {
+                print("voice \(SpeakerLabels.label(before, letters: letters)) → \(SpeakerLabels.label(after, letters: SpeakerLabels.letters(named.voices)))"
+                    + (after.nameSource == "llm" ? (after.certain == true ? " (sure)" : " (guess)") : ""))
+            }
+            for s in out.summary.speakers ?? [] { print("speaker \(s.voice ?? "-") \(s.name): \(s.basis ?? "-")") }
+            print("me_voice:", out.meVoice ?? "null")
+        }
         print(String(decoding: try encoder.encode(out.myTodos), as: UTF8.self))
         exit(0)
     }

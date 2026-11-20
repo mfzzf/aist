@@ -25,6 +25,12 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     public var attendees: [String]?
     /// Their email addresses, where the calendar has them: who gets the minutes by mail.
     public var attendeeEmails: [String]?
+    /// When `summary` was written. Missing on minutes from before versions were kept.
+    public var summaryCreatedAt: Date?
+    /// Minutes that "重新分析整理" replaced, oldest first.
+    public var summaryHistory: [MeetingSummaryVersion]?
+    /// The voices told apart in the recording, with the names found for them.
+    public var voices: [MeetingVoice]?
 
     public init(id: UUID = UUID(), startedAt: Date = .now) {
         self.id = id
@@ -37,6 +43,66 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     }
 
     public var isProcessing: Bool { status == .transcribing || status == .summarizing }
+
+    // MARK: Versions of the minutes
+
+    /// Puts new minutes in place and keeps the ones they replace in `summaryHistory`.
+    public mutating func replaceSummary(_ new: MeetingSummary, title newTitle: String, at date: Date = .now) {
+        if let old = summary {
+            summaryHistory = (summaryHistory ?? []) + [
+                MeetingSummaryVersion(createdAt: summaryCreatedAt ?? startedAt, title: title, summary: old),
+            ]
+        }
+        summary = new
+        title = newTitle
+        summaryCreatedAt = date
+    }
+
+    /// Makes an earlier version the current minutes; the current ones take its place in the history.
+    public mutating func restoreSummary(_ versionID: UUID) {
+        guard var history = summaryHistory, let i = history.firstIndex(where: { $0.id == versionID }) else { return }
+        let version = history.remove(at: i)
+        if let current = summary {
+            history.append(MeetingSummaryVersion(createdAt: summaryCreatedAt ?? startedAt, title: title, summary: current))
+        }
+        history.sort { $0.createdAt < $1.createdAt }
+        summaryHistory = history.isEmpty ? nil : history
+        summary = version.summary
+        summaryCreatedAt = version.createdAt
+        // A title the user typed outlives any version.
+        if titleEdited != true { title = version.title }
+    }
+
+    public mutating func deleteSummaryVersion(_ versionID: UUID) {
+        summaryHistory?.removeAll { $0.id == versionID }
+        if summaryHistory?.isEmpty == true { summaryHistory = nil }
+    }
+
+    /// The meeting as it read with an earlier version of the minutes (nil or unknown id: as it is now).
+    public func showing(version versionID: UUID?) -> Meeting {
+        guard let versionID, let version = summaryHistory?.first(where: { $0.id == versionID }) else { return self }
+        var copy = self
+        copy.summary = version.summary
+        copy.summaryCreatedAt = version.createdAt
+        if titleEdited != true { copy.title = version.title }
+        return copy
+    }
+}
+
+/// Earlier minutes of a meeting, kept when they were regenerated.
+public struct MeetingSummaryVersion: Codable, Identifiable, Hashable, Sendable {
+    public var id: UUID
+    public var createdAt: Date
+    /// The meeting's title while these were the minutes.
+    public var title: String
+    public var summary: MeetingSummary
+
+    public init(id: UUID = UUID(), createdAt: Date, title: String, summary: MeetingSummary) {
+        self.id = id
+        self.createdAt = createdAt
+        self.title = title
+        self.summary = summary
+    }
 }
 
 /// One stretch of speech. `me` is the microphone track, `others` the system-audio track.
@@ -49,6 +115,11 @@ public struct TranscriptSegment: Codable, Hashable, Sendable {
     public var text: String
     /// The line in the subtitle language, when live translation was on.
     public var translation: String?
+    /// A microphone line that is only the other side heard through the speakers (see `EchoFilter`).
+    /// Kept in the transcript, left out of what is shown, summarized and exported.
+    public var echo: Bool?
+    /// Whose voice it is, once the recording's voices were told apart: a `MeetingVoice.id`.
+    public var voice: String?
 
     public init(speaker: Speaker, start: Double, end: Double, text: String, translation: String? = nil) {
         self.speaker = speaker
@@ -59,8 +130,17 @@ public struct TranscriptSegment: Codable, Hashable, Sendable {
     }
 }
 
+public extension Array where Element == TranscriptSegment {
+    /// What people said: the transcript without the microphone's echoes of the other side.
+    var spoken: [TranscriptSegment] { filter { $0.echo != true } }
+}
+
 public struct MeetingSummary: Codable, Hashable, Sendable {
     public var overview: String
+    /// What was discussed, topic by topic in the order it came up. Minutes from before topics have
+    /// `keyPoints` instead.
+    public var topics: [MeetingTopic]?
+    /// The flat list older minutes used; new ones leave it empty.
     public var keyPoints: [String]
     public var decisions: [String]
     /// Tasks that fell to other people (the user's own become to-dos).
@@ -75,7 +155,7 @@ public struct MeetingSummary: Codable, Hashable, Sendable {
     public var decisionAt: [String?]?
 
     enum CodingKeys: String, CodingKey {
-        case speakers, terms
+        case speakers, terms, topics
         case keyPointAt = "key_point_at"
         case decisionAt = "decision_at"
         case overview
@@ -88,6 +168,10 @@ public struct MeetingSummary: Codable, Hashable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         overview = try c.decodeIfPresent(String.self, forKey: .overview) ?? ""
+        // Malformed topics shouldn't cost the rest of the minutes.
+        let decoded = (try? c.decodeIfPresent([MeetingTopic].self, forKey: .topics)) ?? []
+        let kept = decoded.filter { !$0.isEmpty }
+        topics = kept.isEmpty ? nil : kept
         keyPoints = try c.decodeIfPresent([String].self, forKey: .keyPoints) ?? []
         decisions = try c.decodeIfPresent([String].self, forKey: .decisions) ?? []
         othersActions = try c.decodeIfPresent([OthersAction].self, forKey: .othersActions) ?? []
@@ -101,6 +185,71 @@ public struct MeetingSummary: Codable, Hashable, Sendable {
     /// Seconds into the meeting where key point / decision `i` was said.
     public func keyPointTime(_ i: Int) -> Double? { MeetingTime.at(keyPointAt, i) }
     public func decisionTime(_ i: Int) -> Double? { MeetingTime.at(decisionAt, i) }
+
+    /// Every line of the discussion, for search: topic titles, their points and conclusions, or the
+    /// key points of older minutes.
+    public var discussionText: [String] {
+        (topics ?? []).flatMap { [$0.title] + $0.points.map(\.text) + [$0.conclusion ?? ""] } + keyPoints
+    }
+}
+
+/// One thing the meeting spent time on: what was said about it and where it ended up.
+public struct MeetingTopic: Codable, Hashable, Sendable {
+    public var title: String
+    /// "mm:ss" where the meeting turned to it.
+    public var at: String?
+    public var points: [TopicPoint]
+    /// Where the topic ended up; nil when it was left open.
+    public var conclusion: String?
+
+    enum CodingKeys: String, CodingKey { case title, at, points, conclusion }
+
+    public init(title: String, at: String? = nil, points: [TopicPoint] = [], conclusion: String? = nil) {
+        self.title = title
+        self.at = at
+        self.points = points
+        self.conclusion = conclusion
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = (try c.decodeIfPresent(String.self, forKey: .title) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        at = try? c.decodeIfPresent(String.self, forKey: .at)
+        points = (try c.decodeIfPresent([TopicPoint].self, forKey: .points) ?? []).filter { !$0.text.isEmpty }
+        let end = (try? c.decodeIfPresent(String.self, forKey: .conclusion))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        conclusion = end?.isEmpty == false ? end : nil
+    }
+
+    public var time: Double? { MeetingTime.seconds(at) }
+    var isEmpty: Bool { points.isEmpty && conclusion == nil }
+}
+
+/// One thing said under a topic, with where to hear it.
+public struct TopicPoint: Codable, Hashable, Sendable {
+    public var text: String
+    /// "mm:ss" of the line that best supports it.
+    public var at: String?
+
+    enum CodingKeys: String, CodingKey { case text, at }
+
+    public init(text: String, at: String? = nil) {
+        self.text = text
+        self.at = at
+    }
+
+    /// `{"text": …, "at": …}`, or a bare string from a model that skipped the object.
+    public init(from decoder: Decoder) throws {
+        if let plain = try? decoder.singleValueContainer().decode(String.self) {
+            text = plain.trimmingCharacters(in: .whitespacesAndNewlines)
+            at = nil
+            return
+        }
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = (try c.decodeIfPresent(String.self, forKey: .text) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        at = try? c.decodeIfPresent(String.self, forKey: .at)
+    }
+
+    public var time: Double? { MeetingTime.seconds(at) }
 }
 
 /// A name or term as the minutes settled on it, and how recognition heard it.
@@ -164,14 +313,21 @@ public struct MeetingSpeaker: Codable, Hashable, Sendable {
     public var said: String
     /// false when the attribution is a guess.
     public var certain: Bool
+    /// Which voice this is about: as the model wrote it, the letter the voice was shown under
+    /// (说话人A → "A"); once saved, the `MeetingVoice.id`.
+    public var voice: String?
+    /// What the name was worked out from.
+    public var basis: String?
 
-    enum CodingKeys: String, CodingKey { case name, said, certain }
+    enum CodingKeys: String, CodingKey { case name, said, certain, voice, basis }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
         said = try c.decodeIfPresent(String.self, forKey: .said) ?? ""
         certain = try c.decodeIfPresent(Bool.self, forKey: .certain) ?? false
+        voice = try? c.decodeIfPresent(String.self, forKey: .voice)
+        basis = try? c.decodeIfPresent(String.self, forKey: .basis)
     }
 }
 

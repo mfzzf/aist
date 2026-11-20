@@ -48,6 +48,11 @@ private struct MeetingSettingsView: View {
     @AppStorage(MeetingSettings.languageKey) private var language = "auto"
     @AppStorage(MeetingSettings.translateToKey) private var translateTo = ""
     @AppStorage(MeetingSettings.liveNotesKey) private var liveNotes = true
+    @AppStorage(MeetingSettings.separateVoicesKey) private var separateVoices = true
+    @AppStorage(MeetingSettings.rememberVoicesKey) private var rememberVoices = true
+    /// The voices remembered on this Mac.
+    @State private var voiceBook = VoiceBook()
+    @State private var confirmForgetVoices = false
     @AppStorage(MeetingSettings.showLiveWindowKey) private var showLiveWindow = true
     @AppStorage(MeetingSettings.shareLiveWindowKey) private var shareLiveWindow = false
     @AppStorage(MeetingSettings.endOnHangUpKey) private var endOnHangUp = true
@@ -83,6 +88,46 @@ private struct MeetingSettingsView: View {
                 } else {
                     Text("「自动识别」会在中文、英文、马来语等已下载的语言里自动切换。").foregroundStyle(.secondary)
                 }
+            }
+
+            Section {
+                Toggle(isOn: $separateVoices) {
+                    Text("区分说话人")
+                    Text("散会后分辨录音里的不同声音，转写按「说话人A」「说话人B」标注，再由 AI 结合对话和日程推断姓名")
+                }
+                Toggle(isOn: $rememberVoices) {
+                    Text("记住确认过的声音")
+                    Text("你自己的声音，和你在会议里确认过名字的人：下次开会按声音直接认出来")
+                }
+                .disabled(!separateVoices)
+                ForEach(voiceBook.people) { person in
+                    LabeledContent {
+                        Button("忘记") {
+                            voiceBook.forget(person.id)
+                            try? voiceBook.save()
+                        }
+                    } label: {
+                        Text(person.isMe ? "我" : person.name)
+                        Text("来自 \(person.prints.count) 场会议")
+                    }
+                }
+                if voiceBook.people.count > 1 {
+                    Button("全部忘记…", role: .destructive) { confirmForgetVoices = true }
+                }
+            } header: {
+                Text("说话人")
+            } footer: {
+                Text("声音在这台 Mac 上分辨，录音不会为此上传；记住的声纹只存在本机，不同步、不导出。首次使用会下载约 22 MB 的模型（pyannote community-1，CC BY 4.0）。")
+                    .foregroundStyle(.secondary)
+            }
+            .onAppear { voiceBook = VoiceBook.load() }
+            .confirmationDialog("忘记所有记住的声音？", isPresented: $confirmForgetVoices) {
+                Button("全部忘记", role: .destructive) {
+                    voiceBook = VoiceBook()
+                    try? voiceBook.save()
+                }
+            } message: {
+                Text("以后的会议要重新确认名字才能再认出来。已有会议里的名字不受影响。")
             }
 
             Section {

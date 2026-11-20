@@ -25,7 +25,8 @@ public enum MeetingExport {
         return s
     }
 
-    /// Minutes, the user's to-dos and everyone else's, optionally the transcript.
+    /// Minutes in the order they read: overview, everyone's to-dos, the discussion topic by topic,
+    /// decisions, what's still open; optionally the transcript.
     public static func markdown(_ m: Meeting, myTodos: [Todo], myName: String = "我", transcript: Bool = true) -> String {
         var out = "# \(m.title)\n\n"
         out += "- 时间：\(dateLine(m))\n"
@@ -33,14 +34,24 @@ public enum MeetingExport {
         out += "\n"
         if let s = m.summary {
             if !s.overview.isEmpty { out += "## 概要\n\n\(s.overview)\n\n" }
-            out += list("要点", s.keyPoints)
-            out += list("决定", s.decisions)
-            let mine = myTodos.map { "- [\($0.done ? "x" : " ")] \($0.title)" + ($0.due.map { "（\($0)）" } ?? "") }
-            if !mine.isEmpty { out += "## \(myName)的待办\n\n" + mine.joined(separator: "\n") + "\n\n" }
-            let others = s.othersActions.map { a in
+            // Everyone's to-dos in one list, the user's first.
+            var todos = myTodos.map { "- [\($0.done ? "x" : " ")] **\(myName)**：\($0.title)" + ($0.due.map { "（\($0)）" } ?? "") }
+            todos += s.othersActions.map { a in
                 "- [ ] " + (a.who.map { "**\($0)**：" } ?? "") + a.task + (a.dueText.map { "（\($0)）" } ?? "")
             }
-            if !others.isEmpty { out += "## 其他人的待办\n\n" + others.joined(separator: "\n") + "\n\n" }
+            if !todos.isEmpty { out += "## 待办\n\n" + todos.joined(separator: "\n") + "\n\n" }
+            if let topics = s.topics, !topics.isEmpty {
+                out += "## 议题\n\n" + topics.enumerated().map { i, t in
+                    var lines = t.points.map { "- \($0.text)" }
+                    if let end = t.conclusion { lines.append("- **结论**：\(end)") }
+                    return "### \(i + 1). \(t.title)" + (t.time.map { "（\(MeetingTime.stamp($0))）" } ?? "") + "\n\n"
+                        + lines.joined(separator: "\n") + "\n\n"
+                }.joined()
+            } else {
+                // Minutes from before topics.
+                out += list("要点", s.keyPoints)
+            }
+            out += list("决定", s.decisions)
             out += list("待跟进", s.openQuestions)
             if let terms = s.terms, !terms.isEmpty {
                 out += "## 人名与术语\n\n" + terms.map { t in
@@ -49,9 +60,9 @@ public enum MeetingExport {
             }
         }
         if let notes = m.notes, !notes.isEmpty { out += "## 备注\n\n\(notes)\n\n" }
-        if transcript, let lines = m.transcript, !lines.isEmpty {
-            out += "## 转写\n\n" + lines.map { seg in
-                var line = "**[\(MeetingTime.stamp(seg.start))] \(seg.speaker == .me ? "我" : "对方")**：\(seg.text)"
+        if transcript, let lines = m.transcript?.spoken, !lines.isEmpty {
+            out += "## 转写\n\n" + zip(lines, SpeakerLabels.labels(lines, voices: m.voices)).map { seg, who in
+                var line = "**[\(MeetingTime.stamp(seg.start))] \(who)**：\(seg.text)"
                 if let t = seg.translation, !t.isEmpty { line += "  \n> \(t)" }
                 return line
             }.joined(separator: "\n\n") + "\n"
@@ -63,29 +74,39 @@ public enum MeetingExport {
         items.isEmpty ? "" : "## \(title)\n\n" + items.map { "- \($0)" }.joined(separator: "\n") + "\n\n"
     }
 
-    /// SRT subtitles of the transcript (with the translation on a second line when there is one).
-    public static func srt(_ transcript: [TranscriptSegment]) -> String {
+    /// SRT subtitles of what was spoken (with the translation on a second line when there is one).
+    public static func srt(_ transcript: [TranscriptSegment], voices: [MeetingVoice]? = nil) -> String {
         func t(_ s: Double) -> String {
             let ms = Int((max(0, s) * 1000).rounded())
             return String(format: "%02d:%02d:%02d,%03d", ms / 3_600_000, ms / 60000 % 60, ms / 1000 % 60, ms % 1000)
         }
-        return transcript.enumerated().map { i, seg in
-            var text = (seg.speaker == .me ? "我：" : "对方：") + seg.text
+        let lines = transcript.spoken
+        let labels = SpeakerLabels.labels(lines, voices: voices)
+        return lines.enumerated().map { i, seg in
+            var text = labels[i] + "：" + seg.text
             if let tr = seg.translation, !tr.isEmpty { text += "\n" + tr }
             return "\(i + 1)\n\(t(seg.start)) --> \(t(max(seg.end, seg.start + 1)))\n\(text)\n"
         }.joined(separator: "\n")
     }
 
-    /// The plain-text mail: minutes plus both sides' to-dos, no transcript.
+    /// The plain-text mail: the same minutes with both sides' open to-dos, no transcript.
     public static func mailBody(_ m: Meeting, myTodos: [Todo], myName: String) -> String {
         var out = "各位好，\n\n以下是「\(m.title)」的会议纪要（\(dateLine(m))）。\n\n"
         guard let s = m.summary else { return out }
         if !s.overview.isEmpty { out += "【概要】\n\(s.overview)\n\n" }
-        out += section("要点", s.keyPoints)
-        out += section("决定", s.decisions)
         var todos: [String] = myTodos.filter { !$0.done }.map { "\(myName)：\($0.title)" + ($0.due.map { "（\($0)）" } ?? "") }
         todos += s.othersActions.map { ($0.who ?? "待定") + "：" + $0.task + ($0.dueText.map { "（\($0)）" } ?? "") }
         out += section("待办", todos)
+        if let topics = s.topics, !topics.isEmpty {
+            out += "【议题】\n" + topics.enumerated().map { i, t in
+                var lines = ["\(i + 1). \(t.title)"] + t.points.map { "   · \($0.text)" }
+                if let end = t.conclusion { lines.append("   结论：\(end)") }
+                return lines.joined(separator: "\n") + "\n"
+            }.joined() + "\n"
+        } else {
+            out += section("要点", s.keyPoints)
+        }
+        out += section("决定", s.decisions)
         out += section("待跟进", s.openQuestions)
         out += "如有遗漏或需要更正，请直接回复。\n"
         return out

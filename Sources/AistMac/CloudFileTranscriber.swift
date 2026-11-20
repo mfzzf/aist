@@ -32,7 +32,8 @@ enum CloudFileTranscriber {
         var errorDescription: String? { message }
     }
 
-    /// Both tracks of a recording on the meeting timeline, echoes of the other side removed.
+    /// Both tracks of a recording on the meeting timeline. (The microphone's echoes of the other side
+    /// are marked afterwards, from the audio: `EchoFilter`.)
     static func transcribe(_ recording: TodoRecording, model: Model, endpoint: CloudEndpoint,
                            language: String) async throws -> [TranscriptSegment] {
         let folder = TodoStore.folder(for: recording.id)
@@ -46,7 +47,7 @@ enum CloudFileTranscriber {
             segments += try await transcribe(file: folder.appendingPathComponent("system.m4a"), speaker: .others,
                                              shift: max(0, -offset), model: model, endpoint: endpoint, language: language)
         }
-        return HeardText.removingEchoes(segments.sorted { $0.start < $1.start })
+        return segments.sorted { $0.start < $1.start }
     }
 
     static func transcribe(file: URL, speaker: TranscriptSegment.Speaker, shift: Double, model: Model,

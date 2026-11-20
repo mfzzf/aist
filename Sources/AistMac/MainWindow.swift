@@ -1,4 +1,5 @@
 import AistAgentUI
+import AistAudio
 import AistCore
 import AppKit
 import SwiftUI
@@ -49,8 +50,9 @@ struct MainActions {
     var startMeeting: () -> Void
     var stopMeeting: () -> Void
     var retryMeeting: (UUID) -> Void
-    /// Write the minutes and both sides' to-dos as a mail to the attendees.
-    var emailMinutes: (UUID) -> Void
+    /// Write the minutes and both sides' to-dos as a mail to the attendees: the meeting, and an
+    /// earlier version of its minutes to send instead of the current ones.
+    var emailMinutes: (UUID, UUID?) -> Void
     /// Bring up the "会议实况" window.
     var showLive: () -> Void
     /// Record a calendar meeting, named after the event.
@@ -181,7 +183,7 @@ struct MainView: View {
                 case .github:
                     GitHubListColumn(model: model, github: github)
                 case .meetings:
-                    MeetingListColumn(model: model, meetings: meetings, recorder: recorder, actions: actions)
+                    MeetingListColumn(model: model, meetings: meetings, recorder: recorder, player: player, actions: actions)
                 case let .mail(account, folder):
                     MailListColumn(model: model, mail: mail, account: account, folder: folder, actions: mailActions)
                         .id(model.pane)
@@ -1060,15 +1062,20 @@ private struct MeetingListColumn: View {
     @ObservedObject var model: MainModel
     @ObservedObject var meetings: MeetingStore
     @ObservedObject var recorder: AudioRecorder
+    @ObservedObject var player: AudioPlayback
     let actions: MainActions
+    @State private var pendingDelete: [Meeting] = []
 
     private var q: String { model.query.trimmingCharacters(in: .whitespaces).lowercased() }
+
+    private var failed: [Meeting] { meetings.sorted.filter { $0.status == .failed } }
 
     private var filtered: [Meeting] {
         let all = meetings.sorted
         guard !q.isEmpty else { return all }
         return all.filter { m in
             var fields = [m.title, m.summary?.overview ?? "", m.notes ?? ""]
+            fields += m.summary?.discussionText ?? []
             fields += m.transcript?.map(\.text) ?? []
             // A name finds the meetings where recognition misheard it, and the other way round.
             for t in m.summary?.terms ?? [] { fields.append(([t.name] + t.heard).joined(separator: " ")) }
@@ -1090,7 +1097,15 @@ private struct MeetingListColumn: View {
                             .tag(m.id)
                             .contextMenu {
                                 if m.status == .ready || m.status == .failed {
-                                    Button("重新生成纪要") { actions.retryMeeting(m.id) }
+                                    Button("重新分析整理") { actions.retryMeeting(m.id) }
+                                }
+                                Divider()
+                                Button("删除…", role: .destructive) { pendingDelete = [m] }
+                                    .disabled(m.status == .recording)
+                                if m.status == .failed, failed.count > 1 {
+                                    Button("删除全部 \(failed.count) 个处理失败的会议…", role: .destructive) {
+                                        pendingDelete = failed
+                                    }
                                 }
                             }
                     }
@@ -1098,6 +1113,17 @@ private struct MeetingListColumn: View {
             }
         }
         .listStyle(.inset)
+        .onDeleteCommand {
+            if let id = model.selection, let m = meetings.meeting(id), m.status != .recording { pendingDelete = [m] }
+        }
+        .confirmationDialog(deleteTitle, isPresented: Binding(
+            get: { !pendingDelete.isEmpty }, set: { if !$0 { pendingDelete = [] } }
+        )) {
+            Button(pendingDelete.count > 1 ? "删除 \(pendingDelete.count) 个会议和录音" : "删除会议和录音",
+                   role: .destructive) { delete(pendingDelete) }
+        } message: {
+            Text("纪要和转写会删除，原始录音移到废纸篓（还能找回）；它生成的待办会保留。")
+        }
         .animation(.default, value: filtered.map(\.id))
         .overlay {
             if filtered.isEmpty {
@@ -1116,6 +1142,21 @@ private struct MeetingListColumn: View {
                 }
             }
         }
+    }
+}
+
+extension MeetingListColumn {
+    private var deleteTitle: String {
+        pendingDelete.count == 1 ? "删除「\(pendingDelete[0].title)」？" : "删除 \(pendingDelete.count) 个处理失败的会议？"
+    }
+
+    private func delete(_ list: [Meeting]) {
+        for m in list where m.status != .recording {
+            if let rec = m.recording, player.loadedID == rec.id { player.stop() }
+            if model.selection == m.id { model.selection = nil }
+            meetings.delete(m.id)
+        }
+        pendingDelete = []
     }
 }
 
@@ -1224,8 +1265,33 @@ private struct MeetingDetail: View {
     @State private var confirmDelete = false
     @State private var copied = false
     @State private var showTranscript = false
+    /// Also list the microphone lines judged to be the other side through the speakers.
+    @State private var showEchoes = false
+    /// The voice being given a typed name, and the name so far.
+    @State private var naming: String?
+    @State private var typedName = ""
     /// A transcript line to bring into view (from a key point's / to-do's time).
     @State private var jumpTarget: Int?
+    /// An earlier version of the minutes being read; nil shows the current ones.
+    @State private var versionID: UUID?
+    @State private var confirmDeleteVersion = false
+
+    /// The meeting with the minutes being read: the current ones, or the earlier version picked.
+    private var shown: Meeting { meeting.showing(version: versionID) }
+
+    /// `version`: an earlier version of the minutes to open on. `transcript`: with the transcript open.
+    init(meeting: Meeting, model: MainModel, store: TodoStore, meetings: MeetingStore, recorder: AudioRecorder,
+         player: AudioPlayback, actions: MainActions, version: UUID? = nil, transcript: Bool = false) {
+        self.meeting = meeting
+        self.model = model
+        self.store = store
+        self.meetings = meetings
+        self.recorder = recorder
+        self.player = player
+        self.actions = actions
+        _versionID = State(initialValue: version)
+        _showTranscript = State(initialValue: transcript)
+    }
 
     private var canRegenerate: Bool { meeting.recording != nil && (meeting.status == .ready || meeting.status == .failed) }
 
@@ -1233,9 +1299,18 @@ private struct MeetingDetail: View {
         (meeting.todoIDs ?? []).compactMap { id in store.items.first { $0.id == id } }
     }
 
+    /// The transcript as listed: what was spoken, or every line with the echoes shown.
+    private var lines: [TranscriptSegment] {
+        let all = meeting.transcript ?? []
+        return showEchoes ? all : all.spoken
+    }
+
+    private var echoCount: Int { (meeting.transcript ?? []).filter { $0.echo == true }.count }
+
     /// The transcript line said closest before `t`.
     private func lineIndex(at t: Double) -> Int? {
-        guard let segs = meeting.transcript, !segs.isEmpty else { return nil }
+        let segs = lines
+        guard !segs.isEmpty else { return nil }
         return segs.lastIndex { $0.start <= t + 1 } ?? 0
     }
 
@@ -1299,116 +1374,49 @@ private struct MeetingDetail: View {
                 if let rec = meeting.recording {
                     RecordingPlayer(recording: rec, player: player)
                 }
+                versions
             }
 
             status
 
-            if let s = meeting.summary {
+            if let s = shown.summary {
                 if !s.overview.isEmpty {
                     Section("概要") {
                         Text(s.overview).textSelection(.enabled)
                     }
                 }
-                if !myTodos.isEmpty {
-                    Section("我的待办") {
-                        ForEach(myTodos) { todo in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                CircleCheck(done: todo.status == .done) {
-                                    withAnimation { store.setDone(todo.id, todo.status == .open) }
-                                }
-                                Button {
-                                    model.pane = todo.status == .done ? .done : .todos
-                                    model.selection = todo.id
-                                } label: {
-                                    Text(todo.title).foregroundStyle(todo.status == .done ? .secondary : .primary)
-                                }
-                                .buttonStyle(.plain)
-                                Spacer()
-                                if let due = DueFormatter.string(todo.dueAt) ?? todo.dueText {
-                                    Text(due).foregroundStyle(.secondary)
-                                }
-                                timeChip(meeting.transcript.flatMap { MeetingTime.find(todo.evidence, in: $0)?.start })
-                            }
-                        }
-                    }
+                todoSection(s)
+                if let topics = s.topics, !topics.isEmpty {
+                    topicSections(topics)
+                } else {
+                    // Minutes from before topics.
+                    bullets("要点", s.keyPoints, time: s.keyPointTime)
                 }
-                if let speakers = s.speakers, !speakers.isEmpty {
-                    Section {
-                        ForEach(Array(speakers.enumerated()), id: \.offset) { _, p in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(p.name).fontWeight(.medium)
-                                if !p.certain {
-                                    Text("推测")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 5).padding(.vertical, 1)
-                                        .background(Capsule().fill(.quaternary))
-                                        .help("AI 根据参会人和对话内容推断，不一定准确；可以点转写里的时间听原声核对")
-                                }
-                                Text(p.said).foregroundStyle(.secondary)
-                            }
-                        }
-                    } header: {
-                        Text("发言人")
-                    } footer: {
-                        if meeting.calendarEventID != nil {
-                            Text("按日程里的参会人推断；转写只区分「我」和「对方」。").foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                bullets("要点", s.keyPoints, time: s.keyPointTime)
                 bullets("决定", s.decisions, time: s.decisionTime)
-                if !s.othersActions.isEmpty {
-                    Section("别人的待办") {
-                        ForEach(Array(s.othersActions.enumerated()), id: \.offset) { _, a in
-                            HStack(alignment: .firstTextBaseline) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(a.task)
-                                    let sub = [a.who, a.dueText].compactMap { $0 }.joined(separator: " · ")
-                                    if !sub.isEmpty { Text(sub).font(.subheadline).foregroundStyle(.secondary) }
-                                }
-                                Spacer()
-                                timeChip(a.time)
-                            }
-                        }
-                    }
-                }
                 bullets("待跟进", s.openQuestions)
-                if let terms = s.terms, !terms.isEmpty {
-                    Section {
-                        ForEach(terms, id: \.name) { t in
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                    Text(t.name).fontWeight(.medium)
-                                    if !t.note.isEmpty { Text(t.note).foregroundStyle(.secondary) }
-                                }
-                                if !t.heard.isEmpty {
-                                    Text("转写里听成：\(t.heard.joined(separator: "、"))")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.tertiary)
-                                }
-                            }
-                        }
-                    } header: {
-                        Text("人名与术语")
-                    } footer: {
-                        Text("搜索正确写法也能找到被听错的会议。").foregroundStyle(.secondary)
-                    }
-                }
+                speakerSection(s)
+                termSection(s)
             }
 
-            if let segments = meeting.transcript, !segments.isEmpty {
+            if meeting.transcript?.isEmpty == false {
                 Section {
-                    DisclosureGroup("转写全文（\(segments.count) 段）", isExpanded: $showTranscript) {
-                        ForEach(Array(segments.enumerated()), id: \.offset) { i, seg in
+                    DisclosureGroup("转写全文（\(lines.count) 段）", isExpanded: $showTranscript) {
+                        let who = SpeakerLabels.labels(lines, voices: meeting.voices)
+                        // Names need more room than 我 / 对方.
+                        let width: CGFloat = meeting.voices == nil ? 32 : 68
+                        ForEach(Array(lines.enumerated()), id: \.offset) { i, seg in
                             let current = isCurrent(seg)
+                            let echo = seg.echo == true
                             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                Text(seg.speaker == .me ? "我" : "对方")
+                                Text(echo ? "回声" : who[i])
                                     .fontWeight(.medium)
-                                    .foregroundStyle(seg.speaker == .me ? Color.accentColor : .secondary)
-                                    .frame(width: 32, alignment: .leading)
+                                    .lineLimit(1)
+                                    .foregroundStyle(echo ? AnyShapeStyle(.tertiary)
+                                        : (who[i] == "我" ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary)))
+                                    .frame(width: width, alignment: .leading)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(seg.text).textSelection(.enabled)
+                                        .foregroundStyle(echo ? .secondary : .primary)
                                     if let tr = seg.translation, !tr.isEmpty {
                                         Text(tr).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                                     }
@@ -1433,6 +1441,17 @@ private struct MeetingDetail: View {
                             .id("seg\(i)")
                         }
                     }
+                } footer: {
+                    if echoCount > 0 {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(showEchoes ? "标为「回声」的行是麦克风从扬声器收到的对方声音，不计入纪要和导出。"
+                                            : "已隐藏 \(echoCount) 行回声：麦克风从扬声器收到的对方声音。")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button(showEchoes ? "隐藏回声" : "显示回声") { showEchoes.toggle() }
+                                .buttonStyle(.link)
+                        }
+                    }
                 }
             }
 
@@ -1448,18 +1467,18 @@ private struct MeetingDetail: View {
             } header: {
                 Text("备注")
             } footer: {
-                Text("重新生成纪要时 AI 会参考备注。").foregroundStyle(.secondary)
+                Text("重新分析整理时 AI 会参考备注。").foregroundStyle(.secondary)
             }
 
         }
         .formStyle(.grouped)
         .toolbar {
             ToolbarItemGroup {
-                Button { actions.emailMinutes(meeting.id) } label: {
+                Button { actions.emailMinutes(meeting.id, versionID) } label: {
                     Label("发送纪要", systemImage: "envelope")
                 }
                 .help("把纪要和双方的待办写成邮件，收件人默认是参会人")
-                .disabled(meeting.summary == nil)
+                .disabled(shown.summary == nil)
                 Menu {
                     // One click: the usual destination is a doc or chat, so straight to the clipboard.
                     Button("拷贝为 Markdown") { copyMarkdown() }
@@ -1473,11 +1492,11 @@ private struct MeetingDetail: View {
                     Label(copied ? "已拷贝" : "导出", systemImage: copied ? "checkmark" : "square.and.arrow.up")
                 }
                 .help("导出纪要和转写")
-                .disabled(meeting.summary == nil && meeting.transcript?.isEmpty != false)
+                .disabled(shown.summary == nil && meeting.transcript?.isEmpty != false)
                 Button { actions.retryMeeting(meeting.id) } label: {
-                    Label(meeting.status == .failed ? "重试" : "重新生成纪要", systemImage: "arrow.clockwise")
+                    Label(meeting.status == .failed ? "重试" : "重新分析整理", systemImage: "arrow.clockwise")
                 }
-                .help(meeting.status == .failed ? "重试" : "重新生成纪要")
+                .help(meeting.status == .failed ? "重试" : "重新整理这场会议的纪要；现在的纪要会留在「纪要版本」里")
                 .disabled(!canRegenerate)
                 Button(role: .destructive) { confirmDelete = true } label: {
                     Label("删除", systemImage: "trash")
@@ -1492,6 +1511,29 @@ private struct MeetingDetail: View {
             DispatchQueue.main.async { loaded = true }
         }
         .onChange(of: meeting.title) { if meeting.title != title { title = meeting.title } }
+        // New minutes arrived, or the version being read is gone: back to the current ones.
+        .onChange(of: meeting.summaryCreatedAt) { versionID = nil }
+        .onChange(of: meeting.summaryHistory) {
+            if let id = versionID, meeting.summaryHistory?.contains(where: { $0.id == id }) != true { versionID = nil }
+        }
+        .alert("这个声音是谁？", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
+            TextField("名字", text: $typedName)
+            Button("好") {
+                let name = typedName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let id = naming, !name.isEmpty { setName(name, for: id) }
+                naming = nil
+            }
+            Button("取消", role: .cancel) { naming = nil }
+        }
+        .confirmationDialog("删除这个版本的纪要？", isPresented: $confirmDeleteVersion) {
+            Button("删除此版本", role: .destructive) {
+                guard let id = versionID else { return }
+                versionID = nil
+                meetings.update(meeting.id) { $0.deleteSummaryVersion(id) }
+            }
+        } message: {
+            Text("只删除这一版纪要，会议、录音、转写和其他版本都不受影响。删除后无法恢复。")
+        }
         .confirmationDialog("删除「\(meeting.title)」？", isPresented: $confirmDelete) {
             Button("删除会议和录音", role: .destructive) {
                 if let rec = meeting.recording, player.loadedID == rec.id { player.stop() }
@@ -1538,7 +1580,7 @@ private struct MeetingDetail: View {
                     ProgressView().controlSize(.small)
                     Text(meeting.status == .transcribing
                          ? (MeetingSettings.afterModel != nil ? "正在用 AstraFlow 转写录音…" : "正在本机转写录音…")
-                         : "正在生成纪要和待办…")
+                         : "正在分析录音，生成纪要和待办…")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -1550,6 +1592,284 @@ private struct MeetingDetail: View {
         case .ready:
             if meeting.summary == nil {
                 Section { Text("这场会议没有生成纪要。").foregroundStyle(.secondary) }
+            }
+        }
+    }
+
+    // MARK: Minutes
+
+    /// Earlier versions of the minutes, once "重新分析整理" has replaced some.
+    @ViewBuilder private var versions: some View {
+        if let history = meeting.summaryHistory, !history.isEmpty {
+            Picker("纪要版本", selection: $versionID) {
+                Text("当前 · " + DueFormatter.stamp(meeting.summaryCreatedAt ?? meeting.startedAt)).tag(UUID?.none)
+                ForEach(history.reversed()) { v in
+                    // Minutes from before versions were kept carry no date of their own.
+                    Text(v.createdAt == meeting.startedAt ? "最初的版本" : DueFormatter.stamp(v.createdAt)).tag(UUID?.some(v.id))
+                }
+            }
+            if let id = versionID {
+                HStack {
+                    Text("正在看较早的一版纪要。").foregroundStyle(.secondary)
+                    Spacer()
+                    Button("设为当前") {
+                        versionID = nil
+                        meetings.update(meeting.id) { $0.restoreSummary(id) }
+                    }
+                    Button("删除此版本…", role: .destructive) { confirmDeleteVersion = true }
+                }
+            }
+        }
+    }
+
+    /// Everyone's to-dos: the user's own (real to-dos, tickable) first, then what fell to others.
+    @ViewBuilder private func todoSection(_ s: MeetingSummary) -> some View {
+        if !myTodos.isEmpty || !s.othersActions.isEmpty {
+            Section("待办") {
+                ForEach(myTodos) { todo in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        CircleCheck(done: todo.status == .done) {
+                            withAnimation { store.setDone(todo.id, todo.status == .open) }
+                        }
+                        Button {
+                            model.pane = todo.status == .done ? .done : .todos
+                            model.selection = todo.id
+                        } label: {
+                            Text(todo.title).foregroundStyle(todo.status == .done ? .secondary : .primary)
+                        }
+                        .buttonStyle(.plain)
+                        Spacer()
+                        if let due = DueFormatter.string(todo.dueAt) ?? todo.dueText {
+                            Text(due).foregroundStyle(.secondary)
+                        }
+                        timeChip(meeting.transcript.flatMap { MeetingTime.find(todo.evidence, in: $0)?.start })
+                    }
+                }
+                ForEach(Array(s.othersActions.enumerated()), id: \.offset) { _, a in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        // Someone else's: nothing to tick.
+                        Image(systemName: "person.circle")
+                            .imageScale(.large)
+                            .foregroundStyle(.tertiary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(a.task).textSelection(.enabled)
+                            Text(a.who ?? "待定").font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if let due = a.dueText { Text(due).foregroundStyle(.secondary) }
+                        timeChip(a.time)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The discussion, one section per topic in the order it came up.
+    private func topicSections(_ topics: [MeetingTopic]) -> some View {
+        ForEach(Array(topics.enumerated()), id: \.offset) { i, topic in
+            Section {
+                ForEach(Array(topic.points.enumerated()), id: \.offset) { _, point in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(point.text).textSelection(.enabled)
+                        Spacer()
+                        timeChip(point.time)
+                    }
+                }
+                if let end = topic.conclusion {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("结论").fontWeight(.medium)
+                        Text(end).textSelection(.enabled)
+                        Spacer()
+                    }
+                }
+            } header: {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("议题 \(i + 1) · \(topic.title)")
+                    Spacer()
+                    timeChip(topic.time)
+                }
+            }
+        }
+    }
+
+    // MARK: Voices
+
+    /// The people whose voices were told apart, in the order first heard.
+    private var people: [MeetingVoice] {
+        (meeting.voices ?? []).filter(\.isPerson).sorted { ($0.firstAt, $0.id) < ($1.firstAt, $1.id) }
+    }
+
+    private func changeVoice(_ id: String, _ change: (inout MeetingVoice) -> Void) {
+        meetings.update(meeting.id) { m in
+            guard let i = m.voices?.firstIndex(where: { $0.id == id }) else { return }
+            change(&m.voices![i])
+        }
+    }
+
+    /// The user says who a voice is (nil: nobody known). What the user says about a voice survives
+    /// every re-analysis.
+    private func setName(_ name: String?, for id: String) {
+        changeVoice(id) {
+            $0.name = name
+            $0.isMe = nil
+            $0.nameSource = name == nil ? nil : "user"
+            $0.certain = name == nil ? nil : true
+        }
+        // A name the user confirmed is worth remembering the voice by.
+        if let name, MeetingSettings.rememberVoices, let rec = meeting.recording {
+            let folder = TodoStore.folder(for: rec.id), offset = rec.micOffset ?? 0
+            Task.detached { SpeakerPass.learn(voice: id, name: name, folder: folder, micOffset: offset) }
+        }
+    }
+
+    /// The user says a voice is their own: it reads as 我, and is kept to recognize them later.
+    private func setMe(_ id: String) {
+        meetings.update(meeting.id) { m in
+            for i in (m.voices ?? []).indices {
+                if m.voices![i].id == id {
+                    m.voices![i].isMe = true
+                    m.voices![i].name = nil
+                    m.voices![i].nameSource = "user"
+                    m.voices![i].certain = true
+                } else if m.voices![i].isMe == true {
+                    m.voices![i].isMe = nil
+                }
+            }
+        }
+        if MeetingSettings.rememberVoices, let rec = meeting.recording {
+            let folder = TodoStore.folder(for: rec.id), offset = rec.micOffset ?? 0
+            Task.detached { SpeakerPass.learnMe(voice: id, folder: folder, micOffset: offset) }
+        }
+    }
+
+    /// The model's one line about a voice, from the minutes being read.
+    private func said(_ voice: MeetingVoice, in s: MeetingSummary) -> String? {
+        s.speakers?.first { $0.voice == voice.id }?.said
+    }
+
+    @ViewBuilder private func voiceSection(_ s: MeetingSummary) -> some View {
+        let people = people
+        let letters = SpeakerLabels.letters(meeting.voices ?? [])
+        // Names from the invitation nobody carries yet.
+        let free = (meeting.attendees ?? []).filter { name in !people.contains { $0.name == name } }
+        Section {
+            ForEach(people) { voice in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(SpeakerLabels.label(voice, letters: letters)).fontWeight(.medium)
+                    if voice.nameSource == "voiceprint" {
+                        Image(systemName: "waveform")
+                            .foregroundStyle(.secondary)
+                            .help("按声音认出来的：和以前会议里你确认过的声音一致")
+                    }
+                    if voice.nameSource == "llm", voice.certain != true {
+                        Text("推测")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(.quaternary))
+                            .help("AI 根据对话和日程里的参会人推断，不一定准确；可以点转写里的时间听原声核对")
+                    }
+                    if let said = said(voice, in: s), !said.isEmpty { Text(said).foregroundStyle(.secondary) }
+                    Spacer()
+                    Text(DueFormatter.minutes(voice.speaking)).foregroundStyle(.tertiary).monospacedDigit()
+                    Menu {
+                        // A guess the user agrees with becomes theirs.
+                        if voice.nameSource != "user", voice.isMe != true, let name = voice.name {
+                            Button("确认是\(name)") { setName(name, for: voice.id) }
+                            Divider()
+                        }
+                        Button("我") { setMe(voice.id) }
+                        ForEach(free, id: \.self) { name in
+                            Button(name) { setName(name, for: voice.id) }
+                        }
+                        Button("其他名字…") {
+                            typedName = voice.name ?? ""
+                            naming = voice.id
+                        }
+                        let others = people.filter { $0.id != voice.id }
+                        if !others.isEmpty {
+                            Divider()
+                            Menu("和…是同一个人") {
+                                ForEach(others) { other in
+                                    Button(SpeakerLabels.label(other, letters: letters)) {
+                                        changeVoice(voice.id) {
+                                            $0.sameAs = other.id
+                                            $0.nameSource = "user"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if voice.isMe == true || voice.name != nil {
+                            Divider()
+                            Button("清除名字") { setName(nil, for: voice.id) }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("这个声音是谁")
+                }
+            }
+        } header: {
+            Text("发言人")
+        } footer: {
+            Text("按录音里的声音区分；名字由 AI 结合对话和日程推断，标「推测」的不一定准。改过名字后「重新分析整理」，纪要正文也会用上。")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private func speakerSection(_ s: MeetingSummary) -> some View {
+        if !people.isEmpty {
+            voiceSection(s)
+        } else if let speakers = s.speakers, !speakers.isEmpty {
+            Section {
+                ForEach(Array(speakers.enumerated()), id: \.offset) { _, p in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(p.name).fontWeight(.medium)
+                        if !p.certain {
+                            Text("推测")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Capsule().fill(.quaternary))
+                                .help("AI 根据参会人和对话内容推断，不一定准确；可以点转写里的时间听原声核对")
+                        }
+                        Text(p.said).foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("发言人")
+            } footer: {
+                if meeting.calendarEventID != nil {
+                    Text("按日程里的参会人推断；转写只区分「我」和「对方」。").foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func termSection(_ s: MeetingSummary) -> some View {
+        if let terms = s.terms, !terms.isEmpty {
+            Section {
+                ForEach(terms, id: \.name) { t in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(t.name).fontWeight(.medium)
+                            if !t.note.isEmpty { Text(t.note).foregroundStyle(.secondary) }
+                        }
+                        if !t.heard.isEmpty {
+                            Text("转写里听成：\(t.heard.joined(separator: "、"))")
+                                .font(.subheadline)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            } header: {
+                Text("人名与术语")
+            } footer: {
+                Text("搜索正确写法也能找到被听错的会议。").foregroundStyle(.secondary)
             }
         }
     }
@@ -1573,7 +1893,7 @@ private struct MeetingDetail: View {
     private enum ExportKind { case markdown, word, srt }
 
     private func copyMarkdown() {
-        let markdown = MeetingExport.markdown(meeting, myTodos: exportTodos, myName: UserIdentity.names.first ?? "我")
+        let markdown = MeetingExport.markdown(shown, myTodos: exportTodos, myName: UserIdentity.names.first ?? "我")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(markdown, forType: .string)
         copied = true
@@ -1585,8 +1905,8 @@ private struct MeetingDetail: View {
 
     private func export(_ kind: ExportKind) {
         let panel = NSSavePanel()
-        let name = meeting.title.replacingOccurrences(of: "/", with: "-")
-        let markdown = MeetingExport.markdown(meeting, myTodos: exportTodos, myName: UserIdentity.names.first ?? "我")
+        let name = shown.title.replacingOccurrences(of: "/", with: "-")
+        let markdown = MeetingExport.markdown(shown, myTodos: exportTodos, myName: UserIdentity.names.first ?? "我")
         let data: Data?
         switch kind {
         case .markdown:
@@ -1596,7 +1916,7 @@ private struct MeetingDetail: View {
         case .srt:
             panel.allowedContentTypes = [.init(filenameExtension: "srt") ?? .plainText]
             panel.nameFieldStringValue = name + ".srt"
-            data = Data(MeetingExport.srt(meeting.transcript ?? []).utf8)
+            data = Data(MeetingExport.srt(meeting.transcript ?? [], voices: meeting.voices).utf8)
         case .word:
             panel.allowedContentTypes = [.init(filenameExtension: "docx") ?? .data]
             panel.nameFieldStringValue = name + ".docx"
@@ -1647,6 +1967,104 @@ private struct MeetingDetail: View {
             if !prefix.isEmpty { text.insert(NSAttributedString(string: prefix), at: range.location) }
         }
     }
+}
+
+// MARK: - Layout check
+
+/// `-aistMeetingShot <dir>`: draws the meeting detail for an invented meeting into PNGs, off screen,
+/// to check the layout. The meeting lives in stores of its own in a temporary folder; nobody's data
+/// is read or written.
+@MainActor
+enum MeetingDetailDemo {
+    static func shoot(into dir: String, recorder: AudioRecorder, player: AudioPlayback) async {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("aist-demo-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = TodoStore(fileURL: folder.appendingPathComponent("todos.json"))
+        let meetings = MeetingStore(fileURL: folder.appendingPathComponent("meetings.json"))
+        guard let earlier = try? MeetingSummarizer.parse(earlierMinutes), let current = try? MeetingSummarizer.parse(minutes) else { return }
+        let id = meetings.create(startedAt: Date(timeIntervalSince1970: 1_800_000_000)).id
+        let todos = store.apply(current.myTodos, origin: .meeting, meetingID: id)
+        meetings.update(id) {
+            $0.duration = 1500
+            $0.status = .ready
+            $0.attendees = ["张三", "李四"]
+            // One line the microphone only picked up from the speakers.
+            var echo = TranscriptSegment(speaker: .me, start: 16.2, end: 23, text: "原定三十号整体上线但测试只剩三天风险比较大")
+            echo.echo = true
+            var lines = [
+                TranscriptSegment(speaker: .others, start: 16, end: 23, text: "原定三十号整体上线，但测试只剩三天，风险比较大。"),
+                echo,
+                TranscriptSegment(speaker: .me, start: 40, end: 47, text: "我建议分两期，第一期只上订单和支付。"),
+                TranscriptSegment(speaker: .others, start: 100, end: 108, text: "第二期多了对账功能，大概多八个人天。"),
+                TranscriptSegment(speaker: .others, start: 120, end: 127, text: "折扣我回去问一下财务，周五前给你答复。"),
+                TranscriptSegment(speaker: .me, start: 128, end: 135, text: "那我先按十三万二做一版报价单，周四发你。"),
+            ]
+            // Three voices: one named by the minutes (a guess), one still a letter, the user.
+            for (i, voice) in ["s1", "m2", "m1", "s2", "s1", "m1"].enumerated() { lines[i].voice = voice }
+            $0.transcript = lines
+            var named = MeetingVoice(id: "s1", track: .others, speaking: 540, firstAt: 16)
+            named.name = "张三"
+            named.nameSource = "llm"
+            named.certain = false
+            var me = MeetingVoice(id: "m1", track: .me, speaking: 420, firstAt: 40)
+            me.isMe = true
+            var speakers = MeetingVoice(id: "m2", track: .me, speaking: 500, firstAt: 16.2)
+            speakers.echoOf = "s1"
+            $0.voices = [named, MeetingVoice(id: "s2", track: .others, speaking: 95, firstAt: 100), me, speakers]
+            $0.replaceSummary(earlier.summary, title: earlier.title, at: $0.startedAt.addingTimeInterval(1500))
+            $0.replaceSummary(current.summary, title: current.title, at: $0.startedAt.addingTimeInterval(86400))
+            $0.todoIDs = todos.added
+        }
+        guard let meeting = meetings.meeting(id) else { return }
+        let actions = MainActions(capture: {}, voice: {}, startMeeting: {}, stopMeeting: {}, retryMeeting: { _ in },
+                                  emailMinutes: { _, _ in }, showLive: {}, recordEvent: { _ in })
+        for (name, version) in [("meeting-detail", UUID?.none), ("meeting-detail-earlier", meeting.summaryHistory?.first?.id)] {
+            let view = MeetingDetail(meeting: meeting, model: MainModel(), store: store, meetings: meetings,
+                                     recorder: recorder, player: player, actions: actions, version: version, transcript: true)
+            // Tall enough for every section, and far off any screen.
+            let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 720, height: 1900),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: view)
+            window.orderFrontRegardless()
+            try? await Task.sleep(for: .seconds(1.5))
+            if let content = window.contentView, let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+            }
+            window.close()
+        }
+    }
+
+    /// Topic-by-topic minutes, as they are written now.
+    private static let minutes = """
+        {"title": "项目 A 周会", "overview": "周会过了交付排期和报价两件事。原定月底整体上线，因为测试只剩三天改成分两期：三十号先上订单和支付，报表和导出顺延两周。第二期多了对账功能，报价从十二万调到十三万二，折扣等财务答复。",
+         "speakers": [{"voice": "s1", "name": "张三", "said": "主持会议，指出测试时间不够，负责向财务确认折扣", "certain": false, "basis": null},
+                      {"voice": "s2", "name": "说话人A", "said": "补充了第二期的工作量", "certain": false, "basis": null}],
+         "topics": [
+           {"title": "交付排期", "at": "00:16", "conclusion": "分两期交付：三十号上订单和支付，十四号上报表和导出。",
+            "points": [{"text": "张三说原定三十号整体上线，但测试只剩三天，风险比较大。", "at": "00:16"},
+                       {"text": "李四认为三天不够：接口联调上周才完成，回归测试至少要五个工作日。", "at": "00:24"},
+                       {"text": "李四建议分两期，第一期只上订单和支付，报表和导出顺延两周。", "at": "00:40"}]},
+           {"title": "报价调整", "at": "01:28", "conclusion": null,
+            "points": [{"text": "第二期多了对账功能，工作量大概多八个人天，按人天单价一千五算多一万二。", "at": "01:36"},
+                       {"text": "李四先按十三万二做一版报价单；要不要给折扣，张三回去问财务。", "at": "02:00"}]}],
+         "decisions": ["分两期交付：三十号上订单和支付，十四号上报表和导出"], "decision_at": ["01:20"],
+         "open_questions": ["十三万二的报价要不要给折扣，等财务答复"],
+         "my_todos": [{"title": "做一版十三万二的报价单发张三", "requester": "张三", "source": null, "due_text": "周四", "due_at": null,
+                       "priority": "medium", "evidence": "那我先按十三万二做一版报价单，周四发你。", "details": null, "duplicate_of": null, "suggestion": null}],
+         "others_todos": [{"who": "张三", "task": "向财务确认报价折扣", "due_text": "周五前", "at": "02:00"},
+                          {"who": null, "task": "写第二期的验收标准", "due_text": null, "at": null}],
+         "terms": [{"name": "对账功能", "note": "第二期新增的功能", "heard": ["对帐功能"]}]}
+        """
+
+    /// The flat minutes older versions wrote, as the version this meeting had before.
+    private static let earlierMinutes = """
+        {"title": "项目 A 周会", "overview": "定了分两期交付，报价待定。",
+         "key_points": ["测试只剩三天，月底整体上线有风险", "第二期多了对账功能，报价要调整"], "key_point_at": ["00:16", "01:36"],
+         "decisions": ["分两期交付"], "decision_at": ["01:20"], "open_questions": ["报价折扣"], "my_todos": [],
+         "others_todos": [{"who": "张三", "task": "向财务确认报价折扣", "due_text": "周五前", "at": "02:00"}]}
+        """
 }
 
 extension TodoPriority {
